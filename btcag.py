@@ -23,7 +23,6 @@ class PriceAggregator:
         self.KRAKEN_WS_URL = "wss://ws.kraken.com"
         self.BITSTAMP_WS_URL = "wss://ws.bitstamp.net"
         self.GEMINI_WS_URL = "wss://api.gemini.com/v2/marketdata"
-        self.BULLISH_WS_URL = "wss://api.exchange.bullish.com/trading-api/v1/market-data/trades"
         self.exchange_data: Dict[str, PriceData] = {}
         self.price_lock = threading.Lock()
         
@@ -33,7 +32,6 @@ class PriceAggregator:
         self.kraken_ws = None
         self.bitstamp_ws = None
         self.gemini_ws = None
-        self.bullish_ws = None
 
         self.running = False
         self.threads = []
@@ -227,39 +225,6 @@ class PriceAggregator:
     def _on_gemini_close(self, ws, close_status_code=None, close_msg=None):
         print("Gemini WebSocket connection closed")
 
-    def _on_bullish_open(self, ws):
-        subscribe_message = {
-            "jsonrpc": "2.0",
-            "type": "command",
-            "method": "subscribe",
-            "params": {
-                "topic": "anonymousTrades",
-                "symbol": "BTCUSDC" 
-            },
-            "id": str(int(time.time() * 1000)) 
-        }
-        ws.send(json.dumps(subscribe_message))
-        print("Connected to Bullish WebSocket")
-
-    def _on_bullish_message(self, ws, message):
-        try:
-            data = json.loads(message)
-            if data.get('type') in ['snapshot', 'update'] and data.get('dataType') == 'V1TAAnonymousTradeUpdate': 
-                trades = data['data']['trades']
-                for trade in trades:
-                    price = float(trade['price'])
-                    volume = float(trade['quantity'])
-                    side = trade['side'] 
-                    self._update_price('bullish', price, volume=volume, side=side)
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            pass
-
-    def _on_bullish_error(self, ws, error):
-        print(f"Bullish WebSocket Error: {error}")
-
-    def _on_bullish_close(self, ws, close_status_code=None, close_msg=None):
-        print("Bullish WebSocket connection closed")
-
     def _start_coinbase_ws(self):
         self.coinbase_ws = websocket.WebSocketApp(
             self.COINBASE_WS_URL,
@@ -301,29 +266,6 @@ class PriceAggregator:
         )
         self.gemini_ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
 
-    def _start_bullish_ws(self):
-        def on_open(ws): self._on_bullish_open(ws)
-        def on_message(ws, msg): self._on_bullish_message(ws, msg)
-        def on_error(ws, err): 
-            print(f"[Bullish ERROR] {err}")
-            self._on_bullish_error(ws, err)
-        def on_close(ws, code, msg): 
-            print(f"[Bullish CLOSE] code={code}, msg={msg}")
-            self._on_bullish_close(ws, code, msg)
-
-        self.bullish_ws = websocket.WebSocketApp(
-            self.BULLISH_WS_URL,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            header=[
-                "User-Agent: Mozilla/5.0 (X11; Linux x86_64)",
-                "Origin: https://bullish.com"
-            ]
-        )
-        self.bullish_ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
-
     def start(self):
         if self.running:
             print("Aggregator is already running")
@@ -336,8 +278,7 @@ class PriceAggregator:
         kraken_thread = threading.Thread(target=self._start_kraken_ws, daemon=True)
         bitstamp_thread = threading.Thread(target=self._start_bitstamp_ws, daemon=True)
         gemini_thread = threading.Thread(target=self._start_gemini_ws, daemon=True)
-        bullish_thread = threading.Thread(target=self._start_bullish_ws, daemon=True)
-        self.threads = [coinbase_thread, kraken_thread, bitstamp_thread, gemini_thread, bullish_thread]
+        self.threads = [coinbase_thread, kraken_thread, bitstamp_thread, gemini_thread]
         
         for thread in self.threads:
             thread.start()
@@ -355,8 +296,6 @@ class PriceAggregator:
             self.bitstamp_ws.close()
         if self.gemini_ws:
             self.gemini_ws.close()
-        if self.bullish_ws:
-            self.bullish_ws.close()
         print("Price aggregator stopped")
     
     def is_running(self):

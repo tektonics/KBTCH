@@ -27,13 +27,12 @@ class PriceDisplay:
         self.header_lines = 9 
         self.dynamic_lines = 6
         
-        self.exchange_order = ['coinbase', 'kraken', 'bitstamp', 'gemini', 'bullish']
+        self.exchange_order = ['coinbase', 'kraken', 'bitstamp', 'gemini']
         self.exchange_config = {
             'coinbase': {'label': 'Coinbase', 'color': self.BLUE, 'short': 'CB'},
             'kraken': {'label': 'Kraken  ', 'color': self.YELLOW, 'short': 'KR'},
             'bitstamp': {'label': 'Bitstamp', 'color': self.MAGENTA, 'short': 'BS'},
             'gemini' : {'label': 'Gemini', 'color': self.CYAN, 'short': 'GM'},
-            'bullish' : {'label': 'Bullish', 'color' : self.GREEN, 'short': 'BL'},
         }
         
         self.aggregator = PriceAggregator()
