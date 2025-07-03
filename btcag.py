@@ -296,7 +296,7 @@ class PriceAggregator:
                 {"name": "TICKER", "instruments": ["btc-usd"]}
             ]
         }
-        ws.send(json.dumps(subscribe_message)) [8]
+        ws.send(json.dumps(subscribe_message))
 
     def _on_lmax_message(self, ws, message):
         try:
