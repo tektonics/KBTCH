@@ -25,9 +25,9 @@ class PriceDisplay:
         self.last_display_time = 0
         self.display_throttle = 0.1
         self.header_lines = 9
-        self.dynamic_lines = 50
+        self.dynamic_lines = 9
         
-        self.exchange_order = ['coinbase', 'kraken', 'bitstamp', 'gemini', 'paxos', 'crypto.com', 'lmax']
+        self.exchange_order = ['coinbase', 'kraken', 'bitstamp', 'gemini', 'paxos', 'crypto.com']
         self.exchange_config = {
             'coinbase': {'label': 'Coinbase', 'color': self.BLUE, 'short': 'CB'},
             'kraken': {'label': 'Kraken  ', 'color': self.YELLOW, 'short': 'KR'},
@@ -35,7 +35,7 @@ class PriceDisplay:
             'gemini' : {'label': 'Gemini  ', 'color': self.CYAN, 'short': 'GM'},
             'paxos': {'label': 'Paxos   ', 'color': self.WHITE, 'short': 'PX'},
             'crypto.com': {'label': 'Crypto', 'color': self.GREEN, 'short': 'CD'},
-            'lmax': {'label': 'LMAX', 'color': self.CYAN, 'short': 'LM'},
+#            'lmax': {'label': 'LMAX', 'color': self.CYAN, 'short': 'LM'},
         }
         
         self.aggregator = PriceAggregator()
