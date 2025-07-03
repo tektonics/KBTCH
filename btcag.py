@@ -262,13 +262,16 @@ class PriceAggregator:
     def _on_crypto_message(self, ws, message):
         try:
             data = json.loads(message)
+            payload = data
+            if 'result' in data and isinstance(data['result'], dict):
+                payload = data['result']
             if data.get('method') == 'public/heartbeat':
                 ws.send(json.dumps({
                     "id": data['id'],
                     "method": "public/respond-heartbeat"
                 }))
-            elif data.get('channel') == 'trade' and 'data' in data:
-                trades = data['data']
+            elif payload.get('channel') == 'trade' and 'data' in payload:
+                trades = payload['data']
                 if trades:
                     latest_trade = trades[-1]
                     price = float(latest_trade['p'])
