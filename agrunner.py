@@ -24,8 +24,8 @@ class PriceDisplay:
         
         self.last_display_time = 0
         self.display_throttle = 0.1
-        self.header_lines = 9 
-        self.dynamic_lines = 9
+        self.header_lines = 9
+        self.dynamic_lines = 50
         
         self.exchange_order = ['coinbase', 'kraken', 'bitstamp', 'gemini', 'paxos', 'crypto.com', 'lmax']
         self.exchange_config = {

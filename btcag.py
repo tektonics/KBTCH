@@ -290,10 +290,14 @@ class PriceAggregator:
         print("Crypto.com WebSocket connection closed")
 
     def _on_lmax_open(self, ws):
+        print("Connected to LMAX Digital WebSocket")
         subscribe_message = {
             "type": "SUBSCRIBE",
             "channels": [
-                {"name": "TICKER", "instruments": ["btc-usd"]}
+                {
+                    "name":"ORDER_BOOK",
+                    "instruments": ["btc-usd"]
+                }
             ]
         }
         ws.send(json.dumps(subscribe_message))
@@ -387,7 +391,7 @@ class PriceAggregator:
             on_error=self._on_lmax_error,
             on_close=self._on_lmax_close
         )
-        self.lmax_ws.run_forever(ping_interval=30, ping_timeout=5, sslopt={"cert_reqs": ssl.CERT_NONE})
+        self.lmax_ws.run_forever(ping_interval=3, ping_timeout=1, sslopt={"cert_reqs": ssl.CERT_NONE})
 
     def start(self):
         if self.running:
