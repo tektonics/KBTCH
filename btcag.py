@@ -23,6 +23,7 @@ class PriceAggregator:
         self.KRAKEN_WS_URL = "wss://ws.kraken.com"
         self.BITSTAMP_WS_URL = "wss://ws.bitstamp.net"
         self.GEMINI_WS_URL = "wss://api.gemini.com/v2/marketdata"
+        self.PAXOS_WS_URL = "wss://ws.paxos.com/marketdata/BTCUSD"
         self.exchange_data: Dict[str, PriceData] = {}
         self.price_lock = threading.Lock()
         
@@ -32,7 +33,7 @@ class PriceAggregator:
         self.kraken_ws = None
         self.bitstamp_ws = None
         self.gemini_ws = None
-
+        self.paxos_ws = None
         self.running = False
         self.threads = []
     
@@ -199,7 +200,6 @@ class PriceAggregator:
             ]
         }
         ws.send(json.dumps(subscribe_message))
-        print("Connected to Gemini WebSocket")
 
     def _on_gemini_message(self, ws, message):
         try:
@@ -224,6 +224,26 @@ class PriceAggregator:
 
     def _on_gemini_close(self, ws, close_status_code=None, close_msg=None):
         print("Gemini WebSocket connection closed")
+
+    def _on_paxos_open(self, ws):
+        print("Connected to Paxos WebSocket")
+
+    def _on_paxos_message(self, ws, message):
+        try:
+            data = json.loads(message)
+            if data.get('type') == 'UPDATE':
+                price = float(data['price'])
+                volume = float(data['amount'])
+                side = data['side'].upper()
+                self._update_price('paxos', price, volume=volume, side=side)
+        except (json.JSONDecodeError, KeyError, ValueError):
+            pass
+
+    def _on_paxos_error(self, ws, error):
+        print(f"Paxos WebSocket Error: {error}")
+
+    def _on_paxos_close(self, ws, close_status_code=None, close_msg=None):
+        print("Paxos WebSocket connection closed")
 
     def _start_coinbase_ws(self):
         self.coinbase_ws = websocket.WebSocketApp(
@@ -266,6 +286,16 @@ class PriceAggregator:
         )
         self.gemini_ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
 
+    def _start_paxos_ws(self):
+        self.paxos_ws = websocket.WebSocketApp(
+            self.PAXOS_WS_URL,
+            on_open=self._on_paxos_open,
+            on_message=self._on_paxos_message,
+            on_error=self._on_paxos_error,
+            on_close=self._on_paxos_close
+        )
+        self.paxos_ws.run_forever()
+
     def start(self):
         if self.running:
             print("Aggregator is already running")
@@ -278,7 +308,8 @@ class PriceAggregator:
         kraken_thread = threading.Thread(target=self._start_kraken_ws, daemon=True)
         bitstamp_thread = threading.Thread(target=self._start_bitstamp_ws, daemon=True)
         gemini_thread = threading.Thread(target=self._start_gemini_ws, daemon=True)
-        self.threads = [coinbase_thread, kraken_thread, bitstamp_thread, gemini_thread]
+        paxos_thread = threading.Thread(target=self._start_paxos_ws, daemon=True)
+        self.threads = [coinbase_thread, kraken_thread, bitstamp_thread, gemini_thread, paxos_thread]
         
         for thread in self.threads:
             thread.start()
@@ -296,6 +327,8 @@ class PriceAggregator:
             self.bitstamp_ws.close()
         if self.gemini_ws:
             self.gemini_ws.close()
+        if self.paxos_ws:
+            self.paxos_ws.close()
         print("Price aggregator stopped")
     
     def is_running(self):
