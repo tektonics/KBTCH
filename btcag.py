@@ -322,7 +322,7 @@ class PriceAggregator:
                 "Origin: https://bullish.com"
             ]
         )
-
+        self.bullish_ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
 
     def start(self):
         if self.running:
