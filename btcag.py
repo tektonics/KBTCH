@@ -25,6 +25,7 @@ class PriceAggregator:
         self.GEMINI_WS_URL = "wss://api.gemini.com/v2/marketdata"
         self.PAXOS_WS_URL = "wss://ws.paxos.com/marketdata/BTCUSD"
         self.CRYPTO_COM_WS_URL = "wss://stream.crypto.com/exchange/v1/market"
+        self.LMAX_WS_URL = "wss://public-data-api.london-digital.lmax.com/v1/web-socket"
         self.exchange_data: Dict[str, PriceData] = {}
         self.price_lock = threading.Lock()
         
@@ -36,6 +37,7 @@ class PriceAggregator:
         self.gemini_ws = None
         self.paxos_ws = None
         self.crypto_ws = None
+        self.lmax_ws = None
         self.running = False
         self.threads = []
     
@@ -287,6 +289,34 @@ class PriceAggregator:
     def _on_crypto_close(self, ws, close_status_code=None, close_msg=None):
         print("Crypto.com WebSocket connection closed")
 
+    def _on_lmax_open(self, ws):
+        subscribe_message = {
+            "type": "SUBSCRIBE",
+            "channels": [
+                {"name": "TICKER", "instruments": ["btc-usd"]}
+            ]
+        }
+        ws.send(json.dumps(subscribe_message)) [8]
+
+    def _on_lmax_message(self, ws, message):
+        try:
+            data = json.loads(message)
+            if data.get('type') == 'TICKER':
+                price = float(data['last_price'])
+                volume = float(data['last_quantity'])
+                self._update_price('lmax', price, volume=volume, side=None)
+            elif data.get('type') == 'SUBSCRIPTIONS':
+                pass
+            elif data.get('type') == 'ERROR':
+                print(f"LMAX Subscription Error: {data.get('error_code')} - {data.get('error_message')}")
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            pass
+
+    def _on_lmax_error(self, ws, error):
+        print(f"LMAX Digital WebSocket Error: {error}")
+
+    def _on_lmax_close(self, ws, close_status_code=None, close_msg=None):
+        print("LMAX Digital WebSocket connection closed")
 
     def _start_coinbase_ws(self):
         self.coinbase_ws = websocket.WebSocketApp(
@@ -349,6 +379,16 @@ class PriceAggregator:
         )
         self.crypto_ws.run_forever(ping_interval=30, ping_timeout=5, sslopt={"cert_reqs": ssl.CERT_NONE})
 
+    def _start_lmax_ws(self):
+        self.lmax_ws = websocket.WebSocketApp(
+            self.LMAX_WS_URL,
+            on_open=self._on_lmax_open,
+            on_message=self._on_lmax_message,
+            on_error=self._on_lmax_error,
+            on_close=self._on_lmax_close
+        )
+        self.lmax_ws.run_forever(ping_interval=30, ping_timeout=5, sslopt={"cert_reqs": ssl.CERT_NONE})
+
     def start(self):
         if self.running:
             print("Aggregator is already running")
@@ -363,7 +403,8 @@ class PriceAggregator:
         gemini_thread = threading.Thread(target=self._start_gemini_ws, daemon=True)
         paxos_thread = threading.Thread(target=self._start_paxos_ws, daemon=True)
         crypto_com_thread = threading.Thread(target=self._start_crypto_com_ws, daemon=True)
-        self.threads = [coinbase_thread, kraken_thread, bitstamp_thread, gemini_thread, paxos_thread, crypto_com_thread]
+        lmax_thread = threading.Thread(target=self._start_lmax_ws, daemon=True)
+        self.threads = [coinbase_thread, kraken_thread, bitstamp_thread, gemini_thread, paxos_thread, crypto_com_thread, lmax_thread]
         
         for thread in self.threads:
             thread.start()
@@ -385,6 +426,8 @@ class PriceAggregator:
             self.paxos_ws.close()
         if self.crypto_ws:
             self.crypto_ws.close()
+        if self.lmax_ws:
+            self.lmax_ws.close()
         print("Price aggregator stopped")
     
     def is_running(self):
