@@ -23,7 +23,7 @@ class PriceAggregator:
         self.KRAKEN_WS_URL = "wss://ws.kraken.com"
         self.BITSTAMP_WS_URL = "wss://ws.bitstamp.net"
         self.GEMINI_WS_URL = "wss://api.gemini.com/v2/marketdata"
-        self.BULLISH_WS_URL = "wss://api.exchange.bullish.com/trading-api/v1/market-data/trades" 
+        self.BULLISH_WS_URL = "wss://api.exchange.bullish.com/trading-api/v1/market-data/trades"
         self.exchange_data: Dict[str, PriceData] = {}
         self.price_lock = threading.Lock()
         
@@ -32,6 +32,7 @@ class PriceAggregator:
         self.coinbase_ws = None
         self.kraken_ws = None
         self.bitstamp_ws = None
+        self.gemini_ws = None
         self.bullish_ws = None
 
         self.running = False
@@ -315,9 +316,12 @@ class PriceAggregator:
             on_open=on_open,
             on_message=on_message,
             on_error=on_error,
-            on_close=on_close
+            on_close=on_close,
+            header=[
+                "User-Agent: Mozilla/5.0 (X11; Linux x86_64)",
+                "Origin: https://bullish.com"
+            ]
         )
-        self.bullish_ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
 
 
     def start(self):
