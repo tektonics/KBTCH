@@ -34,7 +34,7 @@ class PriceDisplay:
             'bitstamp': {'label': 'Bitstamp', 'color': self.MAGENTA, 'short': 'BS'},
             'gemini' : {'label': 'Gemini  ', 'color': self.CYAN, 'short': 'GM'},
             'paxos': {'label': 'Paxos   ', 'color': self.WHITE, 'short': 'PX'},
-            'crypto.com': {'label': 'Crypto', 'color': self.GREEN, 'short': 'CD'},
+            'crypto.com': {'label': 'Crypto  ', 'color': self.GREEN, 'short': 'CD'},
 #            'lmax': {'label': 'LMAX', 'color': self.CYAN, 'short': 'LM'},
         }
         
@@ -162,7 +162,6 @@ class PriceDisplay:
         return f"  {status_part} | {active_part} | {time_part}"
     
     def _update_display(self):
-        """Update the complete display in-place"""
         current_prices = self.aggregator.get_current_prices()
         
         current_line = self.header_lines + 1
@@ -210,8 +209,6 @@ class PriceDisplay:
             config = self.exchange_config[exchange]
             exchange_info.append(f"{config['color']}{config['label']} ({config['short']}){self.RESET}")
         
-        print(f"  Exchanges: {' | '.join(exchange_info)}")
-        print(f"  Colors: {self.GREEN}Green ↗ = Up{self.RESET} | {self.RED}Red ↘ = Down{self.RESET} | {self.RESET}Gray → = No Change{self.RESET}")
         print(f"  {self.DIM}Press Ctrl+C to exit{self.RESET}")
         print()
         print("=" * 80)
