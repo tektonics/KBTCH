@@ -3,10 +3,12 @@ import json
 import time
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
+from zoneinfo import ZoneInfo  # Python 3.9+
 from kalshi_bot.kalshi_client import KalshiClient
 
 class BTCPriceMonitor:
-    def __init__(self, price_file: str = "btc_price.json"):
+    def __init__(self, price_file: str = "aggregate_price.json"):
         self.price_file = Path(price_file)
         self.last_price = None
         self.last_modified = None
@@ -47,7 +49,11 @@ class BTCPriceMonitor:
         return None
 
 class KalshiMarketAnalyzer:
-    def __init__(self, event_id: str = "KXBTCD-25JUN1610"):
+    def __init__(self, event_id: Optional[str] = None):
+        # Generate current event ID if not provided
+        if event_id is None:
+            event_id = self.generate_current_event_id()
+        
         self.event_id = event_id
         self.client = KalshiClient()
         self.btc_monitor = BTCPriceMonitor()
@@ -55,6 +61,85 @@ class KalshiMarketAnalyzer:
         self.target_market = None
         self.last_btc_price = None
         self.last_market_update = None
+    
+    def get_edt_time(self) -> datetime:
+        """Get current time in EDT timezone"""
+        try:
+            # Use zoneinfo for Python 3.9+
+            edt_tz = ZoneInfo("America/New_York")
+            return datetime.now(edt_tz)
+        except ImportError:
+            # Fallback for older Python versions using pytz
+            try:
+                import pytz
+                edt_tz = pytz.timezone('America/New_York')
+                return datetime.now(edt_tz)
+            except ImportError:
+                print("Warning: Neither zoneinfo nor pytz available. Using system time.")
+                return datetime.now()
+    
+    def generate_current_event_id(self) -> str:
+        """Generate event ID based on NEXT hour in EDT time in format: KXBTCD-25JUL0322"""
+        now = self.get_edt_time()
+        
+        # Always get the next hour ahead
+        next_hour = now.replace(minute=0, second=0, microsecond=0)
+        next_hour = next_hour.replace(hour=(now.hour + 1) % 24)
+        
+        # If we rolled over to next day, adjust the date
+        if next_hour.hour == 0 and now.hour == 23:
+            next_hour = next_hour.replace(day=now.day + 1)
+        
+        # Format: YYMMMDDHH (e.g., 25JUL0322 for July 03, 2025 at 22:00)
+        year = next_hour.strftime("%y")   # 25 for 2025
+        month = next_hour.strftime("%b").upper()  # JUL, JUN, etc.
+        day = next_hour.strftime("%d")    # 03 for 3rd day
+        hour = next_hour.strftime("%H")   # 22 for 22:00 (10 PM)
+        
+        event_time = f"{year}{month}{day}{hour}"
+        event_id = f"KXBTCD-{event_time}"
+        
+        print(f"Generated event ID: {event_id}")
+        print(f"Current time (EDT): {now.strftime('%B %d, %Y at %H:%M %Z')}")
+        print(f"Target time (EDT): {next_hour.strftime('%B %d, %Y at %H:00 %Z')}")
+        
+        return event_id
+    
+    def try_multiple_event_times(self) -> str:
+        """Try multiple event times starting from next hour to find active markets"""
+        now = self.get_edt_time()
+        
+        # Try next hour, then hour after that, etc.
+        for hour_offset in range(1, 7):  # Start from 1 (next hour) instead of 0
+            target_time = now.replace(minute=0, second=0, microsecond=0)
+            target_time = target_time.replace(hour=(now.hour + hour_offset) % 24)
+            
+            # Handle day rollover
+            if target_time.hour < now.hour and hour_offset > 0:
+                target_time = target_time.replace(day=now.day + 1)
+            
+            year = target_time.strftime("%y")
+            month = target_time.strftime("%b").upper()
+            day = target_time.strftime("%d")
+            hour = target_time.strftime("%H")
+            
+            event_time = f"{year}{month}{day}{hour}"
+            event_id = f"KXBTCD-{event_time}"
+            
+            print(f"Trying event ID: {event_id} ({target_time.strftime('%B %d, %Y at %H:00 %Z')})")
+            
+            # Test if this event has markets
+            try:
+                markets_data = self.client.get_markets(event_id)
+                if markets_data.get("markets"):
+                    print(f"✅ Found active markets for: {event_id}")
+                    return event_id
+            except:
+                continue
+        
+        # Fallback to original format if nothing found
+        print("⚠️  No active markets found, using next hour format")
+        return self.generate_current_event_id()
         
     def extract_strike_price(self, ticker: str) -> float:
         """Extract strike price from ticker format"""
@@ -70,16 +155,28 @@ class KalshiMarketAnalyzer:
     
     async def initialize(self):
         """Initialize markets and select target"""
-        print("Fetching available markets...")
+        print(f"Fetching available markets for event: {self.event_id}")
         
-        markets_data = self.client.get_markets(self.event_id)
-        self.markets = markets_data.get("markets", [])
+        try:
+            markets_data = self.client.get_markets(self.event_id)
+            self.markets = markets_data.get("markets", [])
+        except Exception as e:
+            print(f"Failed to get markets for {self.event_id}: {e}")
+            print("Trying to find active markets...")
+            self.event_id = self.try_multiple_event_times()
+            
+            try:
+                markets_data = self.client.get_markets(self.event_id)
+                self.markets = markets_data.get("markets", [])
+            except Exception as e2:
+                print(f"Failed to find any active markets: {e2}")
+                return False
         
         if not self.markets:
             print(f"No markets found for event: {self.event_id}")
             return False
         
-        print("Available market tickers:")
+        print(f"Found {len(self.markets)} markets:")
         for market in self.markets:
             strike = self.extract_strike_price(market["ticker"])
             print(f"  {market['ticker']} (Strike: ${strike:,.0f})")
@@ -170,8 +267,9 @@ class KalshiMarketAnalyzer:
     def display_market_data(self, market_data):
         """Display current market data with analysis"""
         strike = self.extract_strike_price(self.target_market)
+        edt_time = self.get_edt_time()
         
-        print(f"\n📊 Market Update - {time.strftime('%H:%M:%S')}")
+        print(f"\n📊 Market Update - {edt_time.strftime('%H:%M:%S %Z')}")
         print(f"BTC: ${self.last_btc_price:,.2f} | Strike: ${strike:,.0f}")
         
         if market_data.price:
