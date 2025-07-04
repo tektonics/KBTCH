@@ -17,8 +17,7 @@ class PriceData:
     side: Optional[str] = None
 
 class PriceAggregator:
-    
-    def __init__(self):
+    def __init__(self, output_file: str = "aggregate_price.json"): 
         self.COINBASE_WS_URL = "wss://advanced-trade-ws.coinbase.com"
         self.KRAKEN_WS_URL = "wss://ws.kraken.com"
         self.BITSTAMP_WS_URL = "wss://ws.bitstamp.net"
@@ -29,6 +28,8 @@ class PriceAggregator:
         self.exchange_data: Dict[str, PriceData] = {}
         self.price_lock = threading.Lock()
         
+        self.output_file = output_file
+
         self.price_callbacks: list[Callable] = []
         
         self.coinbase_ws = None
@@ -74,6 +75,20 @@ class PriceAggregator:
             'min_price': min_price,
             'max_price': max_price
         }
+
+    def _write_aggregate_price(self):
+        try:
+            aggregate_price = self.get_aggregate_price()
+            if aggregate_price is None:
+                return
+            data = {
+                'timestamp': datetime.utcnow().isoformat(),
+                'price': aggregate_price,
+            }
+            with open(self.output_file, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"Error writing aggregate price: {e}")
     
     def _update_price(self, exchange: str, price: float, **kwargs):
         with self.price_lock:
@@ -95,6 +110,8 @@ class PriceAggregator:
             except Exception as e:
                 print(f"Error in price callback: {e}")
     
+        self._write_aggregate_price()
+
     def _on_coinbase_open(self, ws):
         subscribe_message = {
             "type": "subscribe",
