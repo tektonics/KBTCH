@@ -11,6 +11,7 @@ from datetime import datetime
 import statistics
 import threading
 from pathlib import Path
+import sys
 
 # Configure logging
 logging.basicConfig(
@@ -90,8 +91,32 @@ class OptimizedBRTI:
         self.json_output_path = Path(self.config.json_output_file)
         self.json_write_lock = threading.Lock()
         
+        # Display management
+        self.display_line_count = 0
+        self.last_price = None
+        self.calculation_count = 0
+        
         # Initialize JSON file
         self.initialize_json_file()
+    
+    def clear_display(self):
+        """Clear the current display line"""
+        if self.display_line_count > 0:
+            sys.stdout.write('\r\033[K')  # Clear current line
+            sys.stdout.flush()
+    
+    def update_single_line_display(self, line: str):
+        """Update display with a single line, clearing the previous one"""
+        self.clear_display()
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        self.display_line_count = 1
+    
+    def print_new_line(self, line: str):
+        """Print a new line (clearing current display first)"""
+        self.clear_display()
+        print(line)
+        self.display_line_count = 0
     
     def initialize_json_file(self):
         """Initialize the JSON output file with default structure"""
@@ -515,20 +540,52 @@ class OptimizedBRTI:
         
         return weighted_sum / weight_sum if weight_sum > 0 else 0.0
     
-    def print_calculation_details(self, order_books: List[OrderBookData], brti_value: float, 
-                                 utilized_depth: float, dynamic_cap: float):
-        """Print detailed calculation information"""
+    def format_single_line_display(self, order_books: List[OrderBookData], brti_value: float, 
+                                  utilized_depth: float, dynamic_cap: float) -> str:
+        """Format all information into a single updating line"""
+        self.calculation_count += 1
+        
+        # Get current time
+        current_time = datetime.now().strftime("%H:%M:%S")
+        
+        # Count valid/invalid exchanges
         valid_exchanges = [ob.exchange_id for ob in order_books if ob.is_valid]
-        invalid_exchanges = [(ob.exchange_id, ob.error_reason) for ob in order_books if not ob.is_valid]
+        invalid_exchanges = [ob.exchange_id for ob in order_books if not ob.is_valid]
         
-        logger.info(f"BRTI: ${brti_value:.2f} | "
-                   f"Depth: {utilized_depth:.1f} | "
-                   f"Cap: {dynamic_cap:.2f} | "
-                   f"Valid: {len(valid_exchanges)}/5 ({','.join(valid_exchanges)})")
+        # Price change indicator
+        price_indicator = ""
+        if self.last_price is not None:
+            if brti_value > self.last_price:
+                price_indicator = "🔼"
+            elif brti_value < self.last_price:
+                price_indicator = "🔽"
+            else:
+                price_indicator = "━"
+        self.last_price = brti_value
         
-        if invalid_exchanges:
-            for exchange, reason in invalid_exchanges:
-                logger.debug(f"  {exchange}: {reason}")
+        # Create exchange status string (short codes)
+        exchange_codes = {
+            'coinbase': 'CB', 'kraken': 'KR', 'bitstamp': 'BS', 
+            'gemini': 'GM', 'cryptocom': 'CC'
+        }
+        
+        valid_codes = [exchange_codes.get(ex, ex[:2].upper()) for ex in valid_exchanges]
+        invalid_codes = [exchange_codes.get(ex, ex[:2].upper()) for ex in invalid_exchanges]
+        
+        # Build the display line
+        parts = [
+            f"{current_time}",
+            f"#{self.calculation_count:04d}",
+            f"BRTI: ${brti_value:,.2f} {price_indicator}",
+            f"Depth: {utilized_depth:.1f}",
+            f"Cap: {dynamic_cap:.1f}" if dynamic_cap != float('inf') else "Cap: ∞",
+            f"Valid: {len(valid_exchanges)}/5 [{','.join(valid_codes)}]"
+        ]
+        
+        if invalid_codes:
+            parts.append(f"❌[{','.join(invalid_codes)}]")
+        
+        return " | ".join(parts)
     
     def calculate_brti(self) -> Optional[float]:
         """Main BRTI calculation method"""
@@ -539,7 +596,8 @@ class OptimizedBRTI:
             order_books = self.fetch_all_order_books()
             
             if not order_books:
-                logger.warning("No order book data available")
+                error_line = f"{datetime.now().strftime('%H:%M:%S')} | #{self.calculation_count + 1:04d} | ERROR: No order book data available"
+                self.update_single_line_display(error_line)
                 self.write_error_to_json("No order book data available")
                 return None
             
@@ -554,22 +612,17 @@ class OptimizedBRTI:
             valid_order_books = [ob for ob in order_books if ob.is_valid]
             
             if len(valid_order_books) < 2:
-                logger.warning(f"Insufficient valid order books: {len(valid_order_books)}")
+                error_line = f"{datetime.now().strftime('%H:%M:%S')} | #{self.calculation_count + 1:04d} | ERROR: Insufficient valid exchanges ({len(valid_order_books)}/5)"
+                self.update_single_line_display(error_line)
                 self.write_error_to_json(f"Insufficient valid order books: {len(valid_order_books)}")
                 return None
-            
-            # Log validation results
-            for ob in order_books:
-                if ob.is_valid:
-                    logger.debug(f"{ob.exchange_id}: VALID")
-                else:
-                    logger.warning(f"{ob.exchange_id}: INVALID - {ob.error_reason}")
             
             # Consolidate order books (with dynamic size capping)
             consolidated_bids, consolidated_asks = self.consolidate_order_books(valid_order_books)
             
             if not consolidated_bids or not consolidated_asks:
-                logger.warning("No consolidated order book data")
+                error_line = f"{datetime.now().strftime('%H:%M:%S')} | #{self.calculation_count + 1:04d} | ERROR: No consolidated order book data"
+                self.update_single_line_display(error_line)
                 self.write_error_to_json("No consolidated order book data")
                 return None
             
@@ -582,11 +635,12 @@ class OptimizedBRTI:
             # Apply exponential weighting
             brti_value = self.apply_exponential_weighting(curves, utilized_depth)
             
-            # Get dynamic cap for logging
+            # Get dynamic cap for display
             dynamic_cap = self.calculate_dynamic_order_size_cap(valid_order_books)
             
-            # Print detailed calculation info
-            self.print_calculation_details(order_books, brti_value, utilized_depth, dynamic_cap)
+            # Display single line update
+            display_line = self.format_single_line_display(order_books, brti_value, utilized_depth, dynamic_cap)
+            self.update_single_line_display(display_line)
             
             # Write successful result to JSON
             additional_data = {
@@ -606,7 +660,8 @@ class OptimizedBRTI:
             return brti_value
             
         except Exception as e:
-            logger.error(f"Error calculating BRTI: {e}")
+            error_line = f"{datetime.now().strftime('%H:%M:%S')} | #{self.calculation_count + 1:04d} | ERROR: {str(e)}"
+            self.update_single_line_display(error_line)
             self.write_error_to_json(f"Error calculating BRTI: {str(e)}")
             return None
         finally:
@@ -614,8 +669,9 @@ class OptimizedBRTI:
     
     def run_continuous(self, duration_seconds: Optional[int] = None):
         """Run BRTI calculations continuously"""
-        logger.info("Starting continuous BRTI calculation...")
-        logger.info(f"JSON output file: {self.json_output_path.absolute()}")
+        self.print_new_line("Starting BRTI Real-Time Index...")
+        self.print_new_line(f"JSON output: {self.json_output_path.absolute()}")
+        self.print_new_line("=" * 80)
         
         start_time = time.time()
         
@@ -624,12 +680,6 @@ class OptimizedBRTI:
                 calculation_start = time.time()
                 
                 brti_value = self.calculate_brti()
-                
-                if brti_value:
-                    # Detailed logging is now handled in print_calculation_details
-                    pass
-                else:
-                    logger.warning("BRTI calculation failed")
                 
                 # Check duration limit
                 if duration_seconds and (time.time() - start_time) >= duration_seconds:
@@ -641,28 +691,30 @@ class OptimizedBRTI:
                 time.sleep(sleep_time)
                 
         except KeyboardInterrupt:
-            logger.info("BRTI calculation stopped by user")
+            self.print_new_line("\nBRTI calculation stopped by user")
         except Exception as e:
-            logger.error(f"Unexpected error in continuous operation: {e}")
+            self.print_new_line(f"\nUnexpected error: {e}")
         finally:
             self.print_final_stats()
     
     def print_final_stats(self):
         """Print final statistics"""
-        logger.info("=== FINAL STATISTICS ===")
-        logger.info(f"Total calculations: {self.stats['total_calculations']}")
-        logger.info(f"Successful calculations: {self.stats['successful_calculations']}")
-        logger.info(f"JSON writes: {self.stats['json_writes']}")
-        logger.info(f"JSON write errors: {self.stats['json_write_errors']}")
+        self.print_new_line("\n" + "=" * 60)
+        self.print_new_line("FINAL STATISTICS")
+        self.print_new_line("=" * 60)
+        print(f"Total calculations: {self.stats['total_calculations']}")
+        print(f"Successful calculations: {self.stats['successful_calculations']}")
+        print(f"JSON writes: {self.stats['json_writes']}")
+        print(f"JSON write errors: {self.stats['json_write_errors']}")
         
         if self.stats['total_calculations'] > 0:
             success_rate = (self.stats['successful_calculations'] / 
                           self.stats['total_calculations'] * 100)
-            logger.info(f"Success rate: {success_rate:.1f}%")
+            print(f"Success rate: {success_rate:.1f}%")
         
-        logger.info("Exchange failure counts:")
+        print("\nExchange failure counts:")
         for exchange, failures in self.stats['exchange_failures'].items():
-            logger.info(f"  {exchange}: {failures}")
+            print(f"  {exchange}: {failures}")
 
 def main():
     """Main execution function"""

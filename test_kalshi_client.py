@@ -67,9 +67,17 @@ class KalshiMarketAnalyzer:
         self.market_updates = 0
         self.ws_messages = 0
         
+        # Time tracking for "seconds since last update"
+        self.last_btc_update_time = None
+        self.last_market_update_time = None
+        self.last_ws_message_time = None
+        
         # Display state
         self.last_display_lines = []
         self.display_line_count = 0
+        
+        # Shutdown flag
+        self.shutdown_requested = False
     
     def get_edt_time(self) -> datetime:
         """Get current time in EDT timezone"""
@@ -148,6 +156,20 @@ class KalshiMarketAnalyzer:
         print(line)
         self.display_line_count = 0
     
+    def format_time_since(self, last_time: Optional[float]) -> str:
+        """Format time since last update as '5s', '2m', etc."""
+        if last_time is None:
+            return "never"
+        
+        seconds_ago = time.time() - last_time
+        
+        if seconds_ago < 60:
+            return f"{int(seconds_ago)}s"
+        elif seconds_ago < 3600:
+            return f"{int(seconds_ago // 60)}m"
+        else:
+            return f"{int(seconds_ago // 3600)}h"
+    
     async def initialize(self):
         """Initialize markets and select target"""
         print(f"Fetching available markets for event: {self.event_id}")
@@ -163,10 +185,16 @@ class KalshiMarketAnalyzer:
             print(f"No markets found for event: {self.event_id}")
             return False
         
-        print(f"Found {len(self.markets)} markets:")
-        for market in self.markets:
-            strike = self.extract_strike_price(market["ticker"])
-            print(f"  {market['ticker']} (Strike: ${strike:,.0f})")
+        # Show summary instead of listing all markets
+        strikes = [self.extract_strike_price(market["ticker"]) for market in self.markets]
+        strikes = [s for s in strikes if s > 0]  # Filter out invalid strikes
+        
+        if strikes:
+            min_strike = min(strikes)
+            max_strike = max(strikes)
+            print(f"Found {len(self.markets)} markets with strikes from ${min_strike:,.0f} to ${max_strike:,.0f}")
+        else:
+            print(f"Found {len(self.markets)} markets (unable to parse strike prices)")
         
         # Wait for initial BTC price
         print("Waiting for BTC price data...")
@@ -175,6 +203,7 @@ class KalshiMarketAnalyzer:
             if btc_price:
                 print(f"BTC price loaded: ${btc_price:,.2f}")
                 self.last_btc_price = btc_price
+                self.last_btc_update_time = time.time()
                 break
             await asyncio.sleep(1)
         
@@ -212,6 +241,7 @@ class KalshiMarketAnalyzer:
         
         def debug_handler(msg):
             self.ws_messages += 1
+            self.last_ws_message_time = time.time()
             msg_type = msg.get("type", "unknown")
             
             if msg_type == "ticker_v2":
@@ -245,9 +275,19 @@ class KalshiMarketAnalyzer:
             self.print_new_line(f"WebSocket error: {e}")
     
     async def run_analysis(self):
-        """Main analysis loop"""
+        """Main analysis loop with proper cleanup"""
         if not await self.initialize():
             return
+        
+        # Wrap the message handler to count messages in normal mode too
+        original_handler = self.client._handle_ws_message
+        
+        def counting_handler(msg):
+            self.ws_messages += 1
+            self.last_ws_message_time = time.time()
+            original_handler(msg)
+        
+        self.client._handle_ws_message = counting_handler
         
         print(f"\n{'='*60}")
         print(f"MONITORING: {self.target_market}")
@@ -262,20 +302,34 @@ class KalshiMarketAnalyzer:
         monitor_task = asyncio.create_task(self.monitor_loop())
         
         try:
-            await asyncio.gather(ws_task, monitor_task)
+            await asyncio.gather(ws_task, monitor_task, return_exceptions=True)
         except KeyboardInterrupt:
-            self.print_new_line("\nShutting down...")
+            pass
+        finally:
+            # Clean shutdown
+            self.shutdown_requested = True
+            ws_task.cancel()
+            monitor_task.cancel()
+            
+            # Wait a bit for tasks to clean up
+            try:
+                await asyncio.wait_for(asyncio.gather(ws_task, monitor_task, return_exceptions=True), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            
+            self.print_new_line("\nShutting down gracefully...")
             await self.client.close()
     
     async def monitor_loop(self):
         """Monitor prices and display updates"""
-        while True:
+        while not self.shutdown_requested:
             try:
                 # Check for BTC price updates
                 current_btc = self.btc_monitor.get_current_price()
                 if current_btc and current_btc != self.last_btc_price:
                     self.last_btc_price = current_btc
                     self.btc_updates += 1
+                    self.last_btc_update_time = time.time()
                     self.update_target_market()
                 
                 # Get market data
@@ -289,15 +343,19 @@ class KalshiMarketAnalyzer:
                     if self.last_market_update != market_data.timestamp:
                         self.market_updates += 1
                         self.last_market_update = market_data.timestamp
+                        self.last_market_update_time = time.time()
                 else:
                     # Show waiting state
                     self.display_waiting_state()
                 
                 await asyncio.sleep(0.1)  # Update display more frequently
                 
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                self.print_new_line(f"Error in monitoring: {e}")
-                await asyncio.sleep(1)
+                if not self.shutdown_requested:
+                    self.print_new_line(f"Error in monitoring: {e}")
+                    await asyncio.sleep(1)
     
     def display_current_state(self, market_data):
         """Display current state on multiple updating lines"""
@@ -340,16 +398,20 @@ class KalshiMarketAnalyzer:
             no_bid = 100 - market_data.yes_ask
             no_ask = 100 - market_data.yes_bid
             no_spread = no_ask - no_bid
-            no_parts.append(f"Bid: {no_bid:.0f}¢ (calc)")
-            no_parts.append(f"Ask: {no_ask:.0f}¢ (calc)")
+            no_parts.append(f"Bid: {no_bid:.0f}¢")
+            no_parts.append(f"Ask: {no_ask:.0f}¢")
             no_parts.append(f"Spread: {no_spread:.0f}¢")
         else:
             no_parts.append("No market data")
         
         line3 = " | ".join(no_parts)
         
-        # Line 4: Update counters and stats
-        line4 = f"Updates → BTC: {self.btc_updates} | Market: {self.market_updates} | WebSocket: {self.ws_messages}"
+        # Line 4: Update counters with time since last update
+        btc_time = self.format_time_since(self.last_btc_update_time)
+        market_time = self.format_time_since(self.last_market_update_time)
+        ws_time = self.format_time_since(self.last_ws_message_time)
+        
+        line4 = f"Last Updates → BTC: {btc_time} | Market: {market_time} | WebSocket: {ws_time}"
         
         # Update all lines at once
         self.update_multiline_display([line1, line2, line3, line4])
@@ -358,8 +420,11 @@ class KalshiMarketAnalyzer:
         """Display waiting state on multiple lines"""
         edt_time = self.get_edt_time()
         
+        btc_time = self.format_time_since(self.last_btc_update_time)
+        ws_time = self.format_time_since(self.last_ws_message_time)
+        
         line1 = f"{edt_time.strftime('%H:%M:%S')} | Waiting for market data..."
-        line2 = f"BTC Updates: {self.btc_updates} | WebSocket Messages: {self.ws_messages}"
+        line2 = f"Last Updates → BTC: {btc_time} | WebSocket: {ws_time}"
         line3 = f"Market: {self.target_market or 'Not selected'}"
         
         self.update_multiline_display([line1, line2, line3])
@@ -367,15 +432,18 @@ class KalshiMarketAnalyzer:
 async def main():
     import sys
     
-    # Check if debug mode is requested
-    if len(sys.argv) > 1 and sys.argv[1] == "debug":
-        print("=== DEBUG MODE ===")
-        analyzer = KalshiMarketAnalyzer()
-        if await analyzer.initialize():
-            await analyzer.debug_websocket_messages()
-    else:
-        analyzer = KalshiMarketAnalyzer()
-        await analyzer.run_analysis()
+    try:
+        # Check if debug mode is requested
+        if len(sys.argv) > 1 and sys.argv[1] == "debug":
+            print("=== DEBUG MODE ===")
+            analyzer = KalshiMarketAnalyzer()
+            if await analyzer.initialize():
+                await analyzer.debug_websocket_messages()
+        else:
+            analyzer = KalshiMarketAnalyzer()
+            await analyzer.run_analysis()
+    except KeyboardInterrupt:
+        print("\nGraceful shutdown initiated...")
 
 if __name__ == "__main__":
     asyncio.run(main())
