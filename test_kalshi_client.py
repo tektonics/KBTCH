@@ -302,23 +302,49 @@ class KalshiMarketAnalyzer:
         monitor_task = asyncio.create_task(self.monitor_loop())
         
         try:
-            await asyncio.gather(ws_task, monitor_task, return_exceptions=True)
-        except KeyboardInterrupt:
-            pass
+            # Run both tasks and handle exceptions properly
+            done, pending = await asyncio.wait(
+                [ws_task, monitor_task], 
+                return_when=asyncio.FIRST_EXCEPTION
+            )
+            
+            # Check if any task had an exception (other than cancellation)
+            for task in done:
+                try:
+                    task.result()  # This will raise the exception if there was one
+                except asyncio.CancelledError:
+                    pass  # Expected during shutdown
+                except Exception as e:
+                    print(f"Task error: {e}")
+                    
+        except Exception as e:
+            print(f"Unexpected error: {e}")
         finally:
             # Clean shutdown
             self.shutdown_requested = True
-            ws_task.cancel()
-            monitor_task.cancel()
             
-            # Wait a bit for tasks to clean up
-            try:
-                await asyncio.wait_for(asyncio.gather(ws_task, monitor_task, return_exceptions=True), timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
+            # Cancel remaining tasks
+            for task in [ws_task, monitor_task]:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for cancellation to complete
+            if not ws_task.done() or not monitor_task.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(ws_task, monitor_task, return_exceptions=True), 
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    pass  # Ignore any cleanup errors
             
             self.print_new_line("\nShutting down gracefully...")
-            await self.client.close()
+            try:
+                await self.client.close()
+            except Exception:
+                pass  # Ignore cleanup errors
     
     async def monitor_loop(self):
         """Monitor prices and display updates"""
@@ -430,8 +456,6 @@ class KalshiMarketAnalyzer:
         self.update_multiline_display([line1, line2, line3])
 
 async def main():
-    import sys
-    
     try:
         # Check if debug mode is requested
         if len(sys.argv) > 1 and sys.argv[1] == "debug":
@@ -443,7 +467,16 @@ async def main():
             analyzer = KalshiMarketAnalyzer()
             await analyzer.run_analysis()
     except KeyboardInterrupt:
-        print("\nGraceful shutdown initiated...")
+        # Handle Ctrl+C gracefully without showing stack trace
+        pass
+    except Exception as e:
+        print(f"Unexpected error: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Final catch for any keyboard interrupts that bubble up
+        print("\nProgram terminated.")
+    except Exception as e:
+        print(f"Fatal error: {e}")
