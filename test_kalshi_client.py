@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+import sys
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -13,7 +14,7 @@ class BTCPriceMonitor:
         self.last_price = None
         self.last_modified = None
         self.last_check = 0
-        self.check_interval = 0.5  # Check file every 500ms instead of every loop
+        self.check_interval = 0.5  # Check file every 500ms
     
     def get_current_price(self) -> Optional[float]:
         """Get BTC price with efficient file monitoring"""
@@ -50,7 +51,6 @@ class BTCPriceMonitor:
 
 class KalshiMarketAnalyzer:
     def __init__(self, event_id: Optional[str] = None):
-        # Generate current event ID if not provided
         if event_id is None:
             event_id = self.generate_current_event_id()
         
@@ -61,40 +61,42 @@ class KalshiMarketAnalyzer:
         self.target_market = None
         self.last_btc_price = None
         self.last_market_update = None
+        
+        # Debug counters
+        self.btc_updates = 0
+        self.market_updates = 0
+        self.ws_messages = 0
+        
+        # Display state
+        self.last_display_lines = []
+        self.display_line_count = 0
     
     def get_edt_time(self) -> datetime:
         """Get current time in EDT timezone"""
         try:
-            # Use zoneinfo for Python 3.9+
             edt_tz = ZoneInfo("America/New_York")
             return datetime.now(edt_tz)
         except ImportError:
-            # Fallback for older Python versions using pytz
             try:
                 import pytz
                 edt_tz = pytz.timezone('America/New_York')
                 return datetime.now(edt_tz)
             except ImportError:
-                print("Warning: Neither zoneinfo nor pytz available. Using system time.")
                 return datetime.now()
     
     def generate_current_event_id(self) -> str:
-        """Generate event ID based on NEXT hour in EDT time in format: KXBTCD-25JUL0322"""
+        """Generate event ID based on NEXT hour in EDT time"""
         now = self.get_edt_time()
-        
-        # Always get the next hour ahead
         next_hour = now.replace(minute=0, second=0, microsecond=0)
         next_hour = next_hour.replace(hour=(now.hour + 1) % 24)
         
-        # If we rolled over to next day, adjust the date
         if next_hour.hour == 0 and now.hour == 23:
             next_hour = next_hour.replace(day=now.day + 1)
         
-        # Format: YYMMMDDHH (e.g., 25JUL0322 for July 03, 2025 at 22:00)
-        year = next_hour.strftime("%y")   # 25 for 2025
-        month = next_hour.strftime("%b").upper()  # JUL, JUN, etc.
-        day = next_hour.strftime("%d")    # 03 for 3rd day
-        hour = next_hour.strftime("%H")   # 22 for 22:00 (10 PM)
+        year = next_hour.strftime("%y")
+        month = next_hour.strftime("%b").upper()
+        day = next_hour.strftime("%d")
+        hour = next_hour.strftime("%H")
         
         event_time = f"{year}{month}{day}{hour}"
         event_id = f"KXBTCD-{event_time}"
@@ -105,42 +107,6 @@ class KalshiMarketAnalyzer:
         
         return event_id
     
-    def try_multiple_event_times(self) -> str:
-        """Try multiple event times starting from next hour to find active markets"""
-        now = self.get_edt_time()
-        
-        # Try next hour, then hour after that, etc.
-        for hour_offset in range(1, 7):  # Start from 1 (next hour) instead of 0
-            target_time = now.replace(minute=0, second=0, microsecond=0)
-            target_time = target_time.replace(hour=(now.hour + hour_offset) % 24)
-            
-            # Handle day rollover
-            if target_time.hour < now.hour and hour_offset > 0:
-                target_time = target_time.replace(day=now.day + 1)
-            
-            year = target_time.strftime("%y")
-            month = target_time.strftime("%b").upper()
-            day = target_time.strftime("%d")
-            hour = target_time.strftime("%H")
-            
-            event_time = f"{year}{month}{day}{hour}"
-            event_id = f"KXBTCD-{event_time}"
-            
-            print(f"Trying event ID: {event_id} ({target_time.strftime('%B %d, %Y at %H:00 %Z')})")
-            
-            # Test if this event has markets
-            try:
-                markets_data = self.client.get_markets(event_id)
-                if markets_data.get("markets"):
-                    print(f"✅ Found active markets for: {event_id}")
-                    return event_id
-            except:
-                continue
-        
-        # Fallback to original format if nothing found
-        print("⚠️  No active markets found, using next hour format")
-        return self.generate_current_event_id()
-        
     def extract_strike_price(self, ticker: str) -> float:
         """Extract strike price from ticker format"""
         try:
@@ -153,6 +119,35 @@ class KalshiMarketAnalyzer:
             pass
         return 0.0
     
+    def clear_display(self):
+        """Clear all display lines"""
+        if self.display_line_count > 0:
+            # Move cursor up and clear each line
+            for i in range(self.display_line_count):
+                sys.stdout.write('\r\033[K')  # Clear current line
+                if i < self.display_line_count - 1:
+                    sys.stdout.write('\033[A')  # Move cursor up
+            sys.stdout.flush()
+            self.display_line_count = 0
+    
+    def update_multiline_display(self, lines: list):
+        """Update multiple lines of display"""
+        self.clear_display()
+        
+        for i, line in enumerate(lines):
+            if i > 0:
+                sys.stdout.write('\n')
+            sys.stdout.write(line)
+        
+        sys.stdout.flush()
+        self.display_line_count = len(lines)
+    
+    def print_new_line(self, line: str):
+        """Print a new line (clearing current display first)"""
+        self.clear_display()
+        print(line)
+        self.display_line_count = 0
+    
     async def initialize(self):
         """Initialize markets and select target"""
         print(f"Fetching available markets for event: {self.event_id}")
@@ -161,16 +156,8 @@ class KalshiMarketAnalyzer:
             markets_data = self.client.get_markets(self.event_id)
             self.markets = markets_data.get("markets", [])
         except Exception as e:
-            print(f"Failed to get markets for {self.event_id}: {e}")
-            print("Trying to find active markets...")
-            self.event_id = self.try_multiple_event_times()
-            
-            try:
-                markets_data = self.client.get_markets(self.event_id)
-                self.markets = markets_data.get("markets", [])
-            except Exception as e2:
-                print(f"Failed to find any active markets: {e2}")
-                return False
+            print(f"Failed to get markets: {e}")
+            return False
         
         if not self.markets:
             print(f"No markets found for event: {self.event_id}")
@@ -200,7 +187,6 @@ class KalshiMarketAnalyzer:
         if not self.last_btc_price or not self.markets:
             return
         
-        # Find closest market
         closest_market = min(
             self.markets,
             key=lambda m: abs(self.extract_strike_price(m["ticker"]) - self.last_btc_price)
@@ -211,14 +197,61 @@ class KalshiMarketAnalyzer:
             self.target_market = new_target
             strike = self.extract_strike_price(new_target)
             diff = abs(strike - self.last_btc_price)
-            print(f"\nSwitched to market: {self.target_market}")
-            print(f"Strike price: ${strike:,.0f} (${diff:,.0f} from current BTC)")
-            print(f"Streaming market: {self.target_market}")
+            self.print_new_line(f"Switched to market: {self.target_market}")
+            self.print_new_line(f"Strike price: ${strike:,.0f} (${diff:,.0f} from current BTC)")
+            self.print_new_line(f"Streaming market: {self.target_market}")
+    
+    async def debug_websocket_messages(self):
+        """Debug WebSocket message flow"""
+        print(f"\n{'='*60}")
+        print(f"DEBUGGING WEBSOCKET MESSAGES")
+        print(f"{'='*60}")
+        
+        # Override the client's message handler to add debug info
+        original_handler = self.client._handle_ws_message
+        
+        def debug_handler(msg):
+            self.ws_messages += 1
+            msg_type = msg.get("type", "unknown")
+            
+            if msg_type == "ticker_v2":
+                data = msg.get("msg", {})
+                market_ticker = data.get("market_ticker", "unknown")
+                
+                # Show ALL fields in ticker_v2 message
+                debug_line = f"[{self.ws_messages}] ticker_v2 FULL: {data}"
+                self.print_new_line(debug_line)
+            
+            elif msg_type == "orderbook_delta":
+                data = msg.get("msg", {})
+                market_ticker = data.get("market_ticker", "unknown")
+                debug_line = f"[{self.ws_messages}] orderbook_delta: {market_ticker}"
+                self.print_new_line(debug_line)
+            
+            else:
+                debug_line = f"[{self.ws_messages}] {msg_type}: {msg}"
+                self.print_new_line(debug_line)
+            
+            # Call original handler
+            original_handler(msg)
+        
+        # Temporarily override for debugging
+        self.client._handle_ws_message = debug_handler
+        
+        # Start WebSocket subscription
+        try:
+            await self.client.subscribe_to_market(self.target_market)
+        except Exception as e:
+            self.print_new_line(f"WebSocket error: {e}")
     
     async def run_analysis(self):
         """Main analysis loop"""
         if not await self.initialize():
             return
+        
+        print(f"\n{'='*60}")
+        print(f"MONITORING: {self.target_market}")
+        print(f"{'='*60}")
         
         # Start WebSocket subscription
         ws_task = asyncio.create_task(
@@ -231,70 +264,118 @@ class KalshiMarketAnalyzer:
         try:
             await asyncio.gather(ws_task, monitor_task)
         except KeyboardInterrupt:
-            print("\nShutting down...")
+            self.print_new_line("\nShutting down...")
             await self.client.close()
     
     async def monitor_loop(self):
         """Monitor prices and display updates"""
-        print(f"\n{'='*60}")
-        print(f"MONITORING: {self.target_market}")
-        print(f"{'='*60}")
-        
         while True:
             try:
                 # Check for BTC price updates
                 current_btc = self.btc_monitor.get_current_price()
                 if current_btc and current_btc != self.last_btc_price:
-                    print(f"\n🔄 BTC Price Update: ${current_btc:,.2f} (was ${self.last_btc_price:,.2f})")
                     self.last_btc_price = current_btc
+                    self.btc_updates += 1
                     self.update_target_market()
                 
                 # Get market data
                 market_data = self.client.get_mid_prices(self.target_market)
                 
-                if market_data and market_data.price is not None:
-                    # Only display if data changed
+                if market_data and (market_data.yes_bid is not None or market_data.yes_ask is not None):
+                    # Always update display with current data
+                    self.display_current_state(market_data)
+                    
+                    # Check if this is new market data
                     if self.last_market_update != market_data.timestamp:
-                        self.display_market_data(market_data)
+                        self.market_updates += 1
                         self.last_market_update = market_data.timestamp
+                else:
+                    # Show waiting state
+                    self.display_waiting_state()
                 
-                await asyncio.sleep(0.5)  # Check twice per second
+                await asyncio.sleep(0.1)  # Update display more frequently
                 
             except Exception as e:
-                print(f"Error in monitoring: {e}")
+                self.print_new_line(f"Error in monitoring: {e}")
                 await asyncio.sleep(1)
     
-    def display_market_data(self, market_data):
-        """Display current market data with analysis"""
+    def display_current_state(self, market_data):
+        """Display current state on multiple updating lines"""
         strike = self.extract_strike_price(self.target_market)
         edt_time = self.get_edt_time()
         
-        print(f"\n📊 Market Update - {edt_time.strftime('%H:%M:%S %Z')}")
-        print(f"BTC: ${self.last_btc_price:,.2f} | Strike: ${strike:,.0f}")
+        # Line 1: Time, BTC, Strike, and position
+        diff = self.last_btc_price - strike if self.last_btc_price and strike else 0
+        if diff > 0:
+            position_str = f"🔥 BTC +${diff:,.0f} ABOVE strike"
+        else:
+            position_str = f"📉 BTC ${abs(diff):,.0f} below strike"
+        
+        line1 = f"{edt_time.strftime('%H:%M:%S')} | BTC: ${self.last_btc_price:,.2f} | Strike: ${strike:,.0f} | {position_str}"
+        
+        # Line 2: YES market data
+        yes_parts = ["YES:"]
+        if market_data.yes_bid and market_data.yes_ask:
+            yes_spread = market_data.yes_ask - market_data.yes_bid
+            yes_parts.append(f"Bid: {market_data.yes_bid:.0f}¢")
+            yes_parts.append(f"Ask: {market_data.yes_ask:.0f}¢")
+            yes_parts.append(f"Spread: {yes_spread:.0f}¢")
+        else:
+            yes_parts.append("No market data")
         
         if market_data.price:
-            print(f"Market Price: ${market_data.price:.2f}")
+            yes_parts.append(f"Last Trade: {market_data.price:.0f}¢")
         
-        if market_data.yes_bid and market_data.yes_ask:
-            spread = market_data.yes_ask - market_data.yes_bid
-            print(f"YES: ${market_data.yes_bid:.2f} / ${market_data.yes_ask:.2f} (spread: ${spread:.2f})")
+        line2 = " | ".join(yes_parts)
         
+        # Line 3: NO market data (calculated from YES if not available)
+        no_parts = ["NO: "]
         if market_data.no_bid and market_data.no_ask:
-            spread = market_data.no_ask - market_data.no_bid
-            print(f"NO:  ${market_data.no_bid:.2f} / ${market_data.no_ask:.2f} (spread: ${spread:.2f})")
+            no_spread = market_data.no_ask - market_data.no_bid
+            no_parts.append(f"Bid: {market_data.no_bid:.0f}¢")
+            no_parts.append(f"Ask: {market_data.no_ask:.0f}¢")
+            no_parts.append(f"Spread: {no_spread:.0f}¢")
+        elif market_data.yes_bid and market_data.yes_ask:
+            # Calculate NO prices from YES (they should add up to 100¢)
+            no_bid = 100 - market_data.yes_ask
+            no_ask = 100 - market_data.yes_bid
+            no_spread = no_ask - no_bid
+            no_parts.append(f"Bid: {no_bid:.0f}¢ (calc)")
+            no_parts.append(f"Ask: {no_ask:.0f}¢ (calc)")
+            no_parts.append(f"Spread: {no_spread:.0f}¢")
+        else:
+            no_parts.append("No market data")
         
-        # Show opportunity analysis
-        if self.last_btc_price and strike:
-            if self.last_btc_price > strike:
-                print(f"🔥 BTC is ${self.last_btc_price - strike:,.0f} ABOVE strike!")
-            else:
-                print(f"📉 BTC is ${strike - self.last_btc_price:,.0f} below strike")
+        line3 = " | ".join(no_parts)
         
-        print("-" * 40)
+        # Line 4: Update counters and stats
+        line4 = f"Updates → BTC: {self.btc_updates} | Market: {self.market_updates} | WebSocket: {self.ws_messages}"
+        
+        # Update all lines at once
+        self.update_multiline_display([line1, line2, line3, line4])
+    
+    def display_waiting_state(self):
+        """Display waiting state on multiple lines"""
+        edt_time = self.get_edt_time()
+        
+        line1 = f"{edt_time.strftime('%H:%M:%S')} | Waiting for market data..."
+        line2 = f"BTC Updates: {self.btc_updates} | WebSocket Messages: {self.ws_messages}"
+        line3 = f"Market: {self.target_market or 'Not selected'}"
+        
+        self.update_multiline_display([line1, line2, line3])
 
 async def main():
-    analyzer = KalshiMarketAnalyzer()
-    await analyzer.run_analysis()
+    import sys
+    
+    # Check if debug mode is requested
+    if len(sys.argv) > 1 and sys.argv[1] == "debug":
+        print("=== DEBUG MODE ===")
+        analyzer = KalshiMarketAnalyzer()
+        if await analyzer.initialize():
+            await analyzer.debug_websocket_messages()
+    else:
+        analyzer = KalshiMarketAnalyzer()
+        await analyzer.run_analysis()
 
 if __name__ == "__main__":
     asyncio.run(main())
