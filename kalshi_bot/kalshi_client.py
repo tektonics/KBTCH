@@ -146,7 +146,7 @@ class KalshiClient:
 
         async with websockets.connect(
             self.ws_url, 
-            extra_headers=headers,
+            additional_headers=headers,
             ping_interval=30,  # Keep connection alive
             ping_timeout=10
         ) as ws:
