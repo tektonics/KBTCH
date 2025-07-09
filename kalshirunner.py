@@ -3,6 +3,9 @@ import json
 import time
 import sys
 import numpy as np
+import subprocess
+import signal
+import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -124,6 +127,105 @@ class BTCPriceMonitor:
         
         return annualized_vol
 
+class BRTIManager:
+    """Manages the BRTI subprocess"""
+    def __init__(self, script_path: str = "brti.py"):
+        self.script_path = Path(script_path)
+        self.process: Optional[subprocess.Popen] = None
+        self.startup_timeout = 30  # seconds to wait for BRTI startup
+        self.price_file = Path("aggregate_price.json")
+        
+    def is_brti_running(self) -> bool:
+        """Check if BRTI process is running and healthy"""
+        if self.process is None:
+            return False
+        
+        # Check if process is still alive
+        if self.process.poll() is not None:
+            return False
+        
+        # Check if price file exists and is being updated
+        if not self.price_file.exists():
+            return False
+        
+        try:
+            # Check if file was modified recently (within last 10 seconds)
+            last_modified = self.price_file.stat().st_mtime
+            time_since_update = time.time() - last_modified
+            return time_since_update < 10
+        except OSError:
+            return False
+    
+    async def start_brti(self) -> bool:
+        """Start BRTI subprocess quietly"""
+        if not self.script_path.exists():
+            return False
+        
+        try:
+            self.process = subprocess.Popen(
+                [sys.executable, str(self.script_path)],
+                stdout=subprocess.DEVNULL,  # Suppress output
+                stderr=subprocess.DEVNULL,  # Suppress errors
+                text=True
+            )
+            
+            # Wait for initialization
+            start_time = time.time()
+            while time.time() - start_time < self.startup_timeout:
+                if self.price_file.exists():
+                    try:
+                        with open(self.price_file, 'r') as f:
+                            data = json.load(f)
+                            if data.get("price") and data.get("status") == "active":
+                                return True
+                    except (json.JSONDecodeError, IOError):
+                        pass
+                
+                await asyncio.sleep(1)
+            
+            return self.process.poll() is None  # Return True if still running
+            
+        except Exception:
+            return False
+    
+    def stop_brti(self):
+        """Stop BRTI subprocess quietly"""
+        if self.process is None:
+            return
+        
+        try:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        except Exception:
+            pass
+        finally:
+            self.process = None
+    
+    def get_brti_status(self) -> Dict[str, Any]:
+        """Get status information about BRTI"""
+        status = {
+            "running": self.is_brti_running(),
+            "pid": self.process.pid if self.process else None,
+            "price_file_exists": self.price_file.exists(),
+            "last_update": None,
+            "current_price": None
+        }
+        
+        if self.price_file.exists():
+            try:
+                status["last_update"] = self.price_file.stat().st_mtime
+                with open(self.price_file, 'r') as f:
+                    data = json.load(f)
+                    status["current_price"] = data.get("price")
+            except (OSError, json.JSONDecodeError):
+                pass
+        
+        return status
+
 class VolatilityAdaptiveTrader:
     def __init__(self, event_id: Optional[str] = None):
         if event_id is None:
@@ -131,7 +233,13 @@ class VolatilityAdaptiveTrader:
         
         self.event_id = event_id
         self.client = KalshiClient()
+        
+        # Silence the KalshiClient subscription messages
+        self._original_client_print = None
+        self._silence_client_output()
+        
         self.btc_monitor = BTCPriceMonitor()
+        self.brti_manager = BRTIManager()
         self.markets = []
         
         # Multi-market tracking
@@ -163,6 +271,36 @@ class VolatilityAdaptiveTrader:
         # Display management
         self.display_line_count = 0
         self.shutdown_requested = False
+        
+        # Setup signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _silence_client_output(self):
+        """Silence KalshiClient print statements"""
+        import builtins
+        self._original_print = builtins.print
+        
+        def silent_print(*args, **kwargs):
+            # Only suppress prints that contain subscription messages
+            message = ' '.join(str(arg) for arg in args)
+            if any(keyword in message.lower() for keyword in ['subscribed', 'kalshi']):
+                return  # Suppress these messages
+            else:
+                self._original_print(*args, **kwargs)  # Allow other prints
+        
+        builtins.print = silent_print
+    
+    def _restore_client_output(self):
+        """Restore normal print functionality"""
+        if self._original_print:
+            import builtins
+            builtins.print = self._original_print
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals"""
+        print(f"\n🛑 Received signal {signum}, initiating graceful shutdown...")
+        self.shutdown_requested = True
     
     def generate_current_event_id(self) -> str:
         """Generate event ID based on NEXT hour in EDT time"""
@@ -409,50 +547,54 @@ class VolatilityAdaptiveTrader:
             return f"{int(seconds_ago // 3600)}h"
     
     async def initialize(self):
-        """Initialize markets and setup"""
-        self.print_new_line(f"Fetching markets for event: {self.event_id}")
+        """Initialize markets and setup with BRTI management"""
+        print("🚀 KBTCH Starting...")
         
+        # Start BRTI quietly
+        if not self.brti_manager.is_brti_running():
+            await self.brti_manager.start_brti()
+        
+        # Get markets and price data quietly
         try:
             markets_data = self.client.get_markets(self.event_id)
             self.markets = markets_data.get("markets", [])
+            
+            if not self.markets:
+                print(f"❌ No markets found for {self.event_id}")
+                return False
+            
+            # Wait for BTC price
+            max_wait = 60
+            start_wait = time.time()
+            
+            while time.time() - start_wait < max_wait:
+                btc_price = self.btc_monitor.get_current_price()
+                if btc_price:
+                    self.last_btc_price = btc_price
+                    break
+                await asyncio.sleep(1)
+            else:
+                print("❌ No BTC price data")
+                return False
+            
+            # Setup markets
+            await asyncio.sleep(2)
+            self.current_volatility = self.btc_monitor.calculate_volatility()
+            await self.update_market_subscriptions()
+            
+            if not self.active_markets:
+                print("❌ No target markets")
+                return False
+            
+            print(f"✅ Ready: {len(self.markets)} markets, BTC ${btc_price:,.0f}")
+            return True
+            
         except Exception as e:
-            self.print_new_line(f"Failed to get markets: {e}")
+            print(f"❌ Setup failed: {e}")
             return False
-        
-        if not self.markets:
-            self.print_new_line(f"No markets found for event: {self.event_id}")
-            return False
-        
-        self.print_new_line(f"Found {len(self.markets)} markets")
-        
-        # Wait for initial BTC price
-        self.print_new_line("Waiting for BTC price data...")
-        while True:
-            btc_price = self.btc_monitor.get_current_price()
-            if btc_price:
-                self.last_btc_price = btc_price
-                self.print_new_line(f"BTC price loaded: ${btc_price:,.2f}")
-                break
-            await asyncio.sleep(1)
-        
-        # Calculate initial volatility and select initial markets
-        await asyncio.sleep(2)  # Give some time for price history
-        self.current_volatility = self.btc_monitor.calculate_volatility()
-        
-        # Select and subscribe to initial markets
-        self.print_new_line("Selecting initial target markets...")
-        await self.update_market_subscriptions()
-        
-        if not self.active_markets:
-            self.print_new_line("Failed to select target markets!")
-            return False
-        
-        self.print_new_line(f"Selected {len(self.active_markets)} initial markets")
-        
-        return True
     
     async def update_market_subscriptions(self):
-        """Update WebSocket subscriptions based on current target markets"""
+        """Update WebSocket subscriptions quietly"""
         target_markets = self.select_target_markets(self.last_btc_price, self.current_volatility)
         
         if not target_markets:
@@ -461,18 +603,18 @@ class VolatilityAdaptiveTrader:
         new_tickers = {market.ticker for market in target_markets}
         current_tickers = self.market_subscriptions.copy()
         
-        # Subscribe to new markets
+        # Subscribe to new markets quietly
         for ticker in new_tickers - current_tickers:
             try:
                 asyncio.create_task(self.client.subscribe_to_market(ticker))
                 self.market_subscriptions.add(ticker)
-            except Exception as e:
-                self.print_new_line(f"Failed to subscribe to {ticker}: {e}")
+            except Exception:
+                pass  # Fail silently
         
         self.active_markets = target_markets
     
     def display_current_state(self):
-        """Display current trading state"""
+        """Display current trading state with BRTI status"""
         try:
             edt_time = datetime.now(ZoneInfo("America/New_York"))
         except ImportError:
@@ -480,14 +622,17 @@ class VolatilityAdaptiveTrader:
         
         lines = []
         
-        # Line 1: Header with BTC price and volatility
+        # Line 1: Header with BTC price, volatility, and BRTI status
         vol_indicator = "🔥" if self.current_volatility > self.volatility_threshold_high else \
                        "📈" if self.current_volatility > self.volatility_threshold_low else "📊"
+        
+        brti_status = "🟢" if self.brti_manager.is_brti_running() else "🔴"
         
         line1 = (f"{edt_time.strftime('%H:%M:%S')} | "
                 f"BTC: ${self.last_btc_price:,.2f} | "
                 f"Vol: {self.current_volatility:.1%} {vol_indicator} | "
-                f"Markets: {len(self.active_markets)}")
+                f"Markets: {len(self.active_markets)} | "
+                f"BRTI: {brti_status}")
         lines.append(line1)
         
         # Line 2: Market ladder overview
@@ -565,13 +710,21 @@ class VolatilityAdaptiveTrader:
         
         self.update_multiline_display(lines)
     
+    async def cleanup(self):
+        """Clean up resources quietly"""
+        # Restore normal print functionality
+        self._restore_client_output()
+        
+        self.brti_manager.stop_brti()
+        try:
+            await self.client.close()
+        except:
+            pass
+    
     async def run_trading_loop(self):
-        """Main trading loop"""
+        """Main trading loop with integrated BRTI management"""
         if not await self.initialize():
             return
-        
-        self.print_new_line("Starting Volatility-Adaptive 3-Market Ladder...")
-        self.print_new_line("=" * 80)
         
         # Setup WebSocket message counting
         original_handler = self.client._handle_ws_message
@@ -585,6 +738,10 @@ class VolatilityAdaptiveTrader:
         
         try:
             while not self.shutdown_requested:
+                # Monitor BRTI health quietly
+                if not self.brti_manager.is_brti_running():
+                    await self.brti_manager.start_brti()
+                
                 # Update BTC price and volatility
                 current_btc = self.btc_monitor.get_current_price()
                 if current_btc and current_btc != self.last_btc_price:
@@ -610,30 +767,72 @@ class VolatilityAdaptiveTrader:
                 await asyncio.sleep(0.5)  # Update twice per second
                 
         except KeyboardInterrupt:
-            self.print_new_line("\nShutdown requested by user...")
+            self.print_new_line("\n🛑 Shutting down...")
         except asyncio.CancelledError:
-            self.print_new_line("\nTask cancelled...")
+            pass
         except Exception as e:
-            self.print_new_line(f"\nUnexpected error: {e}")
+            self.print_new_line(f"\n❌ Error: {e}")
         finally:
             self.shutdown_requested = True
-            try:
-                await self.client.close()
-            except:
-                pass
-            self.print_new_line("Bot stopped.")
+            await self.cleanup()
 
 async def main():
+    """Main entry point with enhanced error handling"""
     trader = VolatilityAdaptiveTrader()
+    
     try:
         await trader.run_trading_loop()
     except KeyboardInterrupt:
-        print("\nShutting down gracefully...")
+        print("\n🛑 Keyboard interrupt received")
     except Exception as e:
-        print(f"Error in main: {e}")
+        print(f"\n❌ Fatal error in main: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Ensure cleanup happens even if trader wasn't fully initialized
+        try:
+            if hasattr(trader, 'brti_manager'):
+                trader.brti_manager.stop_brti()
+        except:
+            pass
 
 if __name__ == "__main__":
     try:
+        # Check for required dependencies
+        missing_deps = []
+        try:
+            import ccxt
+        except ImportError:
+            missing_deps.append("ccxt")
+        
+        try:
+            import numpy as np
+        except ImportError:
+            missing_deps.append("numpy")
+        
+        try:
+            from kalshi_bot.kalshi_client import KalshiClient
+        except ImportError:
+            missing_deps.append("kalshi_bot module")
+        
+        if missing_deps:
+            print("❌ Missing dependencies:")
+            for dep in missing_deps:
+                print(f"   - {dep}")
+            print("\nPlease install missing dependencies and ensure all files are present.")
+            sys.exit(1)
+        
+        # Check for BRTI script
+        if not Path("brti.py").exists():
+            print("❌ brti.py not found in current directory")
+            print("Please ensure brti.py is in the same directory as this script.")
+            sys.exit(1)
+        
+        # Run the main program
         asyncio.run(main())
+        
     except KeyboardInterrupt:
-        print("\nGoodbye!")
+        print("\n👋 Goodbye!")
+    except Exception as e:
+        print(f"\n💥 Startup error: {e}")
+        sys.exit(1)
