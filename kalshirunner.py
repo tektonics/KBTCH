@@ -26,11 +26,12 @@ class KalshiRunner:
         for ticker in self.tickers:
             market_data = self.client.get_mid_prices(ticker)
             strike = self._extract_strike_from_ticker(ticker)
-            market_infos.append({
-                'ticker': ticker,
-                'market_data': market_data,
-                'strike': strike
-            })
+        from market_info import MarketInfo
+        
+        market_infos.append(MarketInfo(
+            ticker=ticker,
+            strike=strike
+        ))
         return market_infos
 
     def _extract_strike_from_ticker(self, ticker: str) -> float:
