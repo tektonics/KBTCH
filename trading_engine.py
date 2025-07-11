@@ -1,6 +1,4 @@
-"""
-Main trading engine that orchestrates all components
-"""
+# trading_engine.py - Orchestrates trade execution and portfolio management
 import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
@@ -8,9 +6,8 @@ import json
 import logging
 
 from portfolio import Portfolio
-from risk_manager import RiskManager
-from strategy import StrategyFactory, Strategy, MarketData
-from order_manager import OrderManager
+from order_manager import OrderManager, OrderResult
+from risk_manager import RiskManager, OrderSignal
 from config import TRADING_CONFIG
 
 # Setup logging
@@ -25,7 +22,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class TradingEngine:
-    """Main trading engine that coordinates all trading components"""
+    """
+    Trading engine that receives decisions from trading_logic.py and executes them
+    
+    This class orchestrates:
+    1. Receiving trading decisions from trading_logic.py
+    2. Converting decisions to orders via order_manager.py
+    3. Updating portfolio state
+    4. Providing status and performance tracking
+    """
     
     def __init__(self, mode: str = 'simulation', kalshi_client=None, config: Dict = None):
         self.mode = mode
@@ -33,25 +38,26 @@ class TradingEngine:
         
         # Initialize components
         self.portfolio = Portfolio(self.config['portfolio']['initial_cash'])
-        self.risk_manager = RiskManager(self.config['risk_limits'])
         self.order_manager = OrderManager(mode, kalshi_client)
-        
-        # Initialize strategy
-        strategy_name = self.config.get('strategy', 'momentum')
-        self.strategy = StrategyFactory.create_strategy(strategy_name)
         
         # State tracking
         self.is_running = False
-        self.last_risk_check = datetime.now()
         self.last_portfolio_save = datetime.now()
         self.emergency_shutdown = False
         
         # Performance tracking
         self.trade_count = 0
         self.start_time = datetime.now()
-        self.daily_stats = {}
+        self.session_stats = {
+            'decisions_processed': 0,
+            'orders_executed': 0,
+            'successful_fills': 0,
+            'rejected_orders': 0,
+            'total_volume': 0.0,
+            'total_pnl': 0.0
+        }
         
-        logger.info(f"Trading engine initialized - Mode: {mode}, Strategy: {strategy_name}")
+        logger.info(f"Trading engine initialized - Mode: {mode}")
     
     def start(self):
         """Start the trading engine"""
@@ -84,94 +90,42 @@ class TradingEngine:
         
         logger.info("Trading engine stopped")
     
-    def process_market_data(self, market_data: List[Dict]) -> Dict[str, Any]:
+    def process_trading_decisions(self, trading_decisions: List) -> List[Dict[str, Any]]:
         """
-        Main entry point called by kalshirunner.py with new market data
+        Main entry point - receives trading decisions from trading_logic.py
         
         Args:
-            market_data: List of market data dictionaries with keys:
-                        ticker, price, bid, ask, volume, timestamp, etc.
+            trading_decisions: List of TradingDecision objects from trading_logic.py
         
         Returns:
-            Dictionary with processing results and statistics
+            List of execution results
         """
         if not self.is_running:
-            return {'status': 'engine_stopped'}
+            return [{'status': 'engine_stopped', 'executed': False}]
         
         if self.emergency_shutdown:
-            return {'status': 'emergency_shutdown'}
+            return [{'status': 'emergency_shutdown', 'executed': False}]
+        
+        results = []
         
         try:
-            # Convert to MarketData objects
-            market_data_objs = []
-            price_updates = {}
+            self.session_stats['decisions_processed'] += len(trading_decisions)
             
-            for data in market_data:
-                market_obj = MarketData(
-                    ticker=data.get('ticker', ''),
-                    price=data.get('price', 0.0),
-                    bid=data.get('bid', 0.0),
-                    ask=data.get('ask', 0.0),
-                    volume=data.get('volume', 0),
-                    timestamp=data.get('timestamp', time.time()),
-                    open_interest=data.get('open_interest', 0)
-                )
-                market_data_objs.append(market_obj)
-                price_updates[market_obj.ticker] = market_obj.price
+            # Update pending orders and process fills
+            self._update_pending_orders_and_fills()
             
-            # Update portfolio with current prices
-            self.portfolio.update_market_prices(price_updates)
+            # Convert trading decisions to order signals
+            order_signals = self._convert_decisions_to_orders(trading_decisions)
             
-            # Update pending orders
-            self.order_manager.update_pending_orders()
-            
-            # Process fills and update portfolio
-            fills = self.order_manager.get_fills()
-            for fill in fills:
-                if fill.filled_quantity > 0:
-                    self.portfolio.add_trade(
-                        fill.market_ticker,
-                        fill.filled_quantity,
-                        fill.filled_price,
-                        fill.side
-                    )
-                    self.trade_count += 1
-            
-            # Periodic risk check
-            if datetime.now() - self.last_risk_check > timedelta(minutes=5):
-                self._perform_risk_check()
-                self.last_risk_check = datetime.now()
-            
-            # Generate trading signals
-            signals = self.strategy.generate_signals(market_data_objs, self.portfolio)
-            
-            results = {
-                'status': 'success',
-                'signals_generated': len(signals),
-                'orders_executed': 0,
-                'portfolio_value': self.portfolio.get_portfolio_value(),
-                'cash': self.portfolio.cash,
-                'positions': len(self.portfolio.positions),
-                'unrealized_pnl': self.portfolio.get_unrealized_pnl()
-            }
-            
-            if signals:
-                # Risk management validation
-                validated_signals = self.risk_manager.validate_orders(signals, self.portfolio)
+            if order_signals:
+                # Execute orders through order manager
+                order_results = self.order_manager.execute_orders(order_signals)
+                self.session_stats['orders_executed'] += len(order_results)
                 
-                if validated_signals:
-                    # Execute orders
-                    order_results = self.order_manager.execute_orders(validated_signals)
-                    results['orders_executed'] = len(order_results)
-                    results['order_results'] = [
-                        {
-                            'order_id': r.order_id,
-                            'market': r.market_ticker,
-                            'side': r.side,
-                            'quantity': r.quantity,
-                            'status': r.status
-                        } for r in order_results
-                    ]
+                # Process results
+                for decision, order_result in zip(trading_decisions, order_results):
+                    result = self._process_order_result(decision, order_result)
+                    results.append(result)
             
             # Periodic portfolio save
             if datetime.now() - self.last_portfolio_save > timedelta(minutes=10):
@@ -181,49 +135,108 @@ class TradingEngine:
             return results
             
         except Exception as e:
-            logger.error(f"Error processing market data: {e}")
-            return {'status': 'error', 'message': str(e)}
+            logger.error(f"Error processing trading decisions: {e}")
+            return [{'status': 'error', 'message': str(e), 'executed': False}]
     
-    def _perform_risk_check(self):
-        """Perform comprehensive risk assessment"""
-        risk_metrics = self.risk_manager.check_portfolio_risk(self.portfolio)
+    def _convert_decisions_to_orders(self, trading_decisions: List) -> List[OrderSignal]:
+        """Convert TradingDecision objects to OrderSignal objects"""
+        order_signals = []
         
-        # Log risk warnings
-        for warning in risk_metrics['risk_warnings']:
-            logger.warning(f"Risk Warning: {warning}")
+        for decision in trading_decisions:
+            action = getattr(decision, 'action', '')
+            
+            if action in ['BUY_YES', 'BUY_NO']:
+                side = 'buy'
+                # For Kalshi, we need to determine the actual price based on YES/NO
+                if action == 'BUY_YES':
+                    price = getattr(decision, 'price', 0.0)
+                else:  # BUY_NO
+                    price = 100 - getattr(decision, 'price', 0.0)  # NO price is inverse of YES price
+            
+            elif action in ['SELL_YES', 'SELL_NO']:
+                side = 'sell'
+                if action == 'SELL_YES':
+                    price = getattr(decision, 'price', 0.0)
+                else:  # SELL_NO
+                    price = 100 - getattr(decision, 'price', 0.0)
+            
+            else:
+                continue  # Skip HOLD, NO_TRADE, etc.
+            
+            order_signal = OrderSignal(
+                market_ticker=getattr(decision, 'ticker', ''),
+                side=side,
+                quantity=getattr(decision, 'quantity', 0),
+                price=price / 100 if price > 1 else price,  # Convert to 0-1 range for Kalshi if needed
+                order_type='limit',
+                reason=f"{action}: {getattr(decision, 'reason', '')}"
+            )
+            order_signals.append(order_signal)
         
-        # Check for emergency conditions
-        if self.risk_manager.emergency_close_check(self.portfolio):
-            logger.critical("EMERGENCY: Triggering position closure")
-            self._emergency_close_positions()
+        return order_signals
     
-    def _emergency_close_positions(self):
-        """Emergency closure of all positions"""
-        self.emergency_shutdown = True
+    def _update_pending_orders_and_fills(self):
+        """Update pending orders and process any new fills"""
+        # Update order statuses
+        self.order_manager.update_pending_orders()
         
-        # Cancel all pending orders
-        self.order_manager.cancel_all_pending_orders()
+        # Get new fills and update portfolio
+        fills = self.order_manager.get_fills()
+        new_fills = [fill for fill in fills if not hasattr(fill, '_processed')]
         
-        # Create market orders to close all positions
-        close_orders = []
-        for ticker, position in self.portfolio.positions.items():
-            if position.quantity != 0:
-                # Create opposing order to close position
-                side = 'sell' if position.quantity > 0 else 'buy'
-                from risk_manager import OrderSignal
-                close_order = OrderSignal(
-                    market_ticker=ticker,
-                    side=side,
-                    quantity=abs(position.quantity),
-                    price=position.current_price,
-                    order_type='market',
-                    reason='EMERGENCY_CLOSE'
+        for fill in new_fills:
+            if fill.filled_quantity > 0:
+                # Update portfolio with the fill
+                self.portfolio.add_trade(
+                    fill.market_ticker,
+                    fill.filled_quantity,
+                    fill.filled_price,
+                    fill.side
                 )
-                close_orders.append(close_order)
+                
+                self.trade_count += 1
+                self.session_stats['successful_fills'] += 1
+                self.session_stats['total_volume'] += fill.filled_quantity * fill.filled_price
+                
+                # Mark as processed
+                fill._processed = True
+                
+                logger.info(f"Fill processed: {fill.side} {fill.filled_quantity} {fill.market_ticker} @ {fill.filled_price:.3f}")
+    
+    def _process_order_result(self, decision, order_result: OrderResult) -> Dict[str, Any]:
+        """Process the result of an order execution"""
+        result = {
+            'decision': {
+                'ticker': getattr(decision, 'ticker', ''),
+                'action': getattr(decision, 'action', ''),
+                'quantity': getattr(decision, 'quantity', 0),
+                'confidence': getattr(decision, 'confidence', 0.0),
+                'edge': getattr(decision, 'edge', 0.0),
+                'reason': getattr(decision, 'reason', '')
+            },
+            'order_result': {
+                'order_id': order_result.order_id,
+                'status': order_result.status,
+                'filled_quantity': order_result.filled_quantity,
+                'filled_price': order_result.filled_price,
+                'error_message': order_result.error_message
+            },
+            'executed': order_result.status in ['filled', 'partial', 'pending'],
+            'timestamp': datetime.now().isoformat()
+        }
         
-        if close_orders:
-            self.order_manager.execute_orders(close_orders)
-            logger.critical(f"Emergency closure: {len(close_orders)} positions")
+        # Update session stats
+        if order_result.status == 'rejected':
+            self.session_stats['rejected_orders'] += 1
+        
+        return result
+    
+    def update_market_prices(self, price_data: Dict[str, float]):
+        """Update portfolio with current market prices"""
+        self.portfolio.update_market_prices(price_data)
+        
+        # Update total P&L
+        self.session_stats['total_pnl'] = self.portfolio.get_portfolio_value() - self.portfolio.initial_cash
     
     def get_status(self) -> Dict[str, Any]:
         """Get comprehensive engine status"""
@@ -231,32 +244,33 @@ class TradingEngine:
         
         portfolio_summary = self.portfolio.get_position_summary()
         order_summary = self.order_manager.get_order_summary()
-        risk_metrics = self.risk_manager.check_portfolio_risk(self.portfolio)
         
         return {
-            'engine_status': {
-                'running': self.is_running,
-                'mode': self.mode,
-                'strategy': self.config.get('strategy'),
-                'runtime_seconds': runtime.total_seconds(),
-                'emergency_shutdown': self.emergency_shutdown
-            },
+            'running': self.is_running,
+            'mode': self.mode,
+            'runtime_seconds': runtime.total_seconds(),
+            'emergency_shutdown': self.emergency_shutdown,
             'portfolio': portfolio_summary,
             'orders': order_summary,
-            'risk': risk_metrics,
+            'session_stats': self.session_stats,
             'performance': {
                 'total_trades': self.trade_count,
                 'trades_per_hour': self.trade_count / max(runtime.total_seconds() / 3600, 0.1),
-                'start_time': self.start_time.isoformat()
+                'start_time': self.start_time.isoformat(),
+                'success_rate': (self.session_stats['successful_fills'] / 
+                               max(self.session_stats['orders_executed'], 1) * 100)
             }
         }
+    
+    def get_portfolio_summary(self) -> Dict[str, Any]:
+        """Get current portfolio summary"""
+        return self.portfolio.get_position_summary()
     
     def force_trade(self, market_ticker: str, side: str, quantity: int, price: float) -> Dict:
         """Force a trade (for manual intervention)"""
         if not self.is_running:
             return {'status': 'error', 'message': 'Engine not running'}
         
-        from risk_manager import OrderSignal
         order = OrderSignal(
             market_ticker=market_ticker,
             side=side,
@@ -265,7 +279,7 @@ class TradingEngine:
             reason='MANUAL_OVERRIDE'
         )
         
-        # Skip risk management for manual trades
+        # Execute without risk management for manual trades
         result = self.order_manager.execute_orders([order])
         
         return {
@@ -277,16 +291,44 @@ class TradingEngine:
             }
         }
     
-    def update_strategy(self, strategy_name: str, config: Dict = None):
-        """Update the trading strategy"""
-        try:
-            self.strategy = StrategyFactory.create_strategy(strategy_name, config)
-            self.config['strategy'] = strategy_name
-            logger.info(f"Strategy updated to: {strategy_name}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to update strategy: {e}")
-            return False
+    def emergency_close_all_positions(self) -> Dict[str, Any]:
+        """Emergency closure of all positions"""
+        if not self.is_running:
+            return {'status': 'error', 'message': 'Engine not running'}
+        
+        self.emergency_shutdown = True
+        
+        # Cancel all pending orders
+        cancelled_count = self.order_manager.cancel_all_pending_orders()
+        
+        # Create orders to close all positions
+        close_orders = []
+        for ticker, position in self.portfolio.positions.items():
+            if position.quantity != 0:
+                # Create opposing order to close position
+                side = 'sell' if position.quantity > 0 else 'buy'
+                close_order = OrderSignal(
+                    market_ticker=ticker,
+                    side=side,
+                    quantity=abs(position.quantity),
+                    price=position.current_price,
+                    order_type='market',
+                    reason='EMERGENCY_CLOSE'
+                )
+                close_orders.append(close_order)
+        
+        results = []
+        if close_orders:
+            results = self.order_manager.execute_orders(close_orders)
+        
+        logger.critical(f"Emergency closure: cancelled {cancelled_count} orders, closing {len(close_orders)} positions")
+        
+        return {
+            'status': 'emergency_close_initiated',
+            'cancelled_orders': cancelled_count,
+            'close_orders': len(close_orders),
+            'results': [{'order_id': r.order_id, 'status': r.status} for r in results]
+        }
     
     def _log_session_summary(self):
         """Log summary of trading session"""
@@ -297,8 +339,11 @@ class TradingEngine:
         logger.info("=== TRADING SESSION SUMMARY ===")
         logger.info(f"Runtime: {runtime}")
         logger.info(f"Mode: {self.mode}")
-        logger.info(f"Strategy: {self.config.get('strategy')}")
-        logger.info(f"Total Trades: {self.trade_count}")
+        logger.info(f"Decisions Processed: {self.session_stats['decisions_processed']}")
+        logger.info(f"Orders Executed: {self.session_stats['orders_executed']}")
+        logger.info(f"Successful Fills: {self.session_stats['successful_fills']}")
+        logger.info(f"Rejected Orders: {self.session_stats['rejected_orders']}")
+        logger.info(f"Total Volume: ${self.session_stats['total_volume']:.2f}")
         logger.info(f"Final Portfolio Value: ${portfolio_value:.2f}")
         logger.info(f"Total P&L: ${total_pnl:.2f} ({total_pnl/self.portfolio.initial_cash*100:.2f}%)")
         logger.info(f"Final Cash: ${self.portfolio.cash:.2f}")
@@ -311,9 +356,10 @@ class TradingEngineManager:
     def __init__(self):
         self.engines: Dict[str, TradingEngine] = {}
     
-    def create_engine(self, name: str, mode: str = 'simulation', config: Dict = None) -> TradingEngine:
+    def create_engine(self, name: str, mode: str = 'simulation', 
+                     kalshi_client=None, config: Dict = None) -> TradingEngine:
         """Create a new trading engine instance"""
-        engine = TradingEngine(mode=mode, config=config)
+        engine = TradingEngine(mode=mode, kalshi_client=kalshi_client, config=config)
         self.engines[name] = engine
         return engine
     
