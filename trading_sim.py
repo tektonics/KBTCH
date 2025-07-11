@@ -1,4 +1,4 @@
-# kalshi_trading_simulator.py
+# enhanced_trading_sim.py - High Frequency Micro Trading Version
 import asyncio
 import json
 import time
@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
+from collections import deque
 from kalshi_bot.kalshi_client import KalshiClient
 
 @dataclass
@@ -24,14 +25,22 @@ class SimulatedPosition:
     entry_time: float
     current_price: Optional[float] = None
     unrealized_pnl: float = 0.0
+    peak_pnl: float = 0.0  # Track peak profit for trailing stops
     
-    def update_current_price(self, price: float):
-        """Update current price and calculate unrealized P&L"""
-        self.current_price = price
+    def update_current_price(self, price_cents: float):
+        """Update current price and calculate unrealized P&L (prices in cents)"""
+        self.current_price = price_cents
         if self.side == "YES":
-            self.unrealized_pnl = (price - self.entry_price) * self.quantity
+            # P&L in dollars: (current_cents - entry_cents) / 100 * quantity
+            pnl_cents_per_contract = price_cents - self.entry_price
+            self.unrealized_pnl = (pnl_cents_per_contract / 100.0) * self.quantity
         else:  # NO position
-            self.unrealized_pnl = (self.entry_price - price) * self.quantity
+            pnl_cents_per_contract = self.entry_price - price_cents
+            self.unrealized_pnl = (pnl_cents_per_contract / 100.0) * self.quantity
+        
+        # Track peak P&L for trailing stops
+        if self.unrealized_pnl > self.peak_pnl:
+            self.peak_pnl = self.unrealized_pnl
 
 @dataclass
 class SimulatedTrade:
@@ -45,6 +54,7 @@ class SimulatedTrade:
     exit_time: float
     realized_pnl: float
     trade_type: str  # "BUY", "SELL"
+    exit_reason: str = "MANUAL"
 
 @dataclass
 class SimulatedPortfolio:
@@ -88,178 +98,437 @@ class MarketInfo:
     action: str = "HOLD"
 
 @dataclass
-class TradingParams:
-    """Consolidated trading parameters"""
-    base_market_count: int = 3
-    volatility_threshold_low: float = 0.5
-    volatility_threshold_high: float = 1.0
-    max_markets: int = 7
-    min_edge_threshold: float = 0.05
-    max_spread_threshold: int = 8
-    max_risk_per_trade: float = 0.02
-    position_size_dollars: float = 500.0  # Fixed position size for simulation
-    max_position_per_market: int = 10  # Max contracts per market
+class HFTradingParams:
+    """High-frequency micro trading parameters"""
+    # Micro position sizing for HFT (prices are in CENTS 0-100)
+    base_position_contracts: int = 10  # Base number of contracts
+    max_position_contracts: int = 50   # Max contracts per position
+    max_portfolio_exposure: float = 0.3  # Lower exposure for HFT
+    max_positions: int = 3  # Conservative position limit
+    
+    # Aggressive risk management for HFT
+    stop_loss_pct: float = 0.08  # Tighter 8% stop loss
+    profit_target_pct: float = 0.12  # Quick 12% profit target
+    trailing_stop_pct: float = 0.04  # 4% trailing stop
+    max_position_time_seconds: float = 300.0  # 5 minute max hold time
+    
+    # HFT edge requirements (lower for more opportunities)
+    min_edge_threshold: float = 0.03  # Lower threshold for more trades
+    max_spread_threshold: float = 12.0  # Accept wider spreads for opportunities
+    min_confidence_score: float = 0.4  # Lower confidence threshold
+    
+    # Momentum and timing
+    momentum_window_seconds: float = 30.0  # Very short momentum window
+    trade_cooldown_seconds: float = 2.0  # Fast re-entry
+    price_change_threshold: float = 0.001  # 0.1% price change trigger
 
-class TradingSimulator:
-    """Handles simulated trade execution and portfolio management"""
+class MomentumTracker:
+    """High-frequency momentum tracking"""
+    
+    def __init__(self, window_seconds: float = 30.0):
+        self.window_seconds = window_seconds
+        self.price_history = deque(maxlen=100)
+        self.last_momentum = 0.0
+        
+    def update_price(self, price: float, timestamp: float):
+        """Update price history with timestamp"""
+        self.price_history.append((timestamp, price))
+        
+    def get_momentum(self) -> float:
+        """Calculate short-term momentum score"""
+        if len(self.price_history) < 5:
+            return self.last_momentum
+            
+        current_time = time.time()
+        cutoff_time = current_time - self.window_seconds
+        
+        # Filter recent prices
+        recent_prices = [(t, p) for t, p in self.price_history if t > cutoff_time]
+        
+        if len(recent_prices) < 3:
+            return self.last_momentum
+            
+        # Calculate momentum using price velocity
+        times = np.array([t for t, _ in recent_prices])
+        prices = np.array([p for _, p in recent_prices])
+        
+        if len(times) < 2:
+            return self.last_momentum
+            
+        # Calculate velocity (price change per second)
+        time_diff = times[-1] - times[0]
+        if time_diff == 0:
+            return self.last_momentum
+            
+        price_change = (prices[-1] - prices[0]) / prices[0]
+        velocity = price_change / time_diff
+        
+        # Normalize and clamp
+        momentum = velocity * 1000  # Scale for readability
+        self.last_momentum = max(-1.0, min(1.0, momentum))
+        return self.last_momentum
+    
+    def get_volatility(self) -> float:
+        """Calculate short-term volatility"""
+        if len(self.price_history) < 10:
+            return 0.5
+            
+        prices = [p for _, p in list(self.price_history)[-10:]]
+        if len(prices) < 2:
+            return 0.5
+            
+        returns = [(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, len(prices))]
+        if not returns:
+            return 0.5
+            
+        return min(2.0, np.std(returns) * 100)  # Cap volatility
+
+class HFRiskManager:
+    """High-frequency risk management"""
+    
+    def __init__(self, params: HFTradingParams):
+        self.params = params
+        self.momentum_tracker = MomentumTracker(params.momentum_window_seconds)
+        self.last_trade_time = {}
+        
+    def update_price(self, price: float):
+        """Update price for momentum tracking"""
+        self.momentum_tracker.update_price(price, time.time())
+    
+    def can_trade_market(self, ticker: str) -> bool:
+        """Check if enough time has passed since last trade"""
+        current_time = time.time()
+        last_trade = self.last_trade_time.get(ticker, 0)
+        return current_time - last_trade >= self.params.trade_cooldown_seconds
+    
+    def record_trade(self, ticker: str):
+        """Record trade time for cooldown tracking"""
+        self.last_trade_time[ticker] = time.time()
+    
+    def calculate_position_size(self, edge: float, confidence: float, 
+                              portfolio_value: float) -> int:
+        """Calculate position size in contracts (prices are in cents)"""
+        # Base contracts scaled by edge and confidence
+        edge_multiplier = min(abs(edge) * 8, 2.5)
+        confidence_multiplier = max(0.3, confidence)
+        
+        # Scale with portfolio size but keep reasonable
+        portfolio_multiplier = max(0.5, min(2.0, portfolio_value / 10000.0))
+        
+        contracts = int(self.params.base_position_contracts * 
+                       edge_multiplier * 
+                       confidence_multiplier * 
+                       portfolio_multiplier)
+        
+        return min(contracts, self.params.max_position_contracts)
+    
+    def should_enter_trade(self, market_info, btc_price: float, 
+                          portfolio_state: Dict) -> Tuple[bool, str]:
+        """HFT entry decision logic"""
+        
+        # Basic data checks
+        if not market_info.market_data or not market_info.edge:
+            return False, "NO_DATA"
+        
+        # Cooldown check
+        if not self.can_trade_market(market_info.ticker):
+            return False, "COOLDOWN"
+        
+        # Portfolio limits
+        if portfolio_state['position_count'] >= self.params.max_positions:
+            return False, "MAX_POSITIONS"
+        
+        exposure_pct = portfolio_state['total_exposure'] / portfolio_state['total_value']
+        if exposure_pct > self.params.max_portfolio_exposure:
+            return False, "MAX_EXPOSURE"
+        
+        # Edge requirements (relaxed for HFT)
+        if abs(market_info.edge) < self.params.min_edge_threshold:
+            return False, "INSUFFICIENT_EDGE"
+        
+        # Spread check (more lenient for HFT opportunities)
+        if market_info.spread_pct and market_info.spread_pct > self.params.max_spread_threshold:
+            return False, "SPREAD_TOO_WIDE"
+        
+        # Momentum alignment (less strict for HFT)
+        momentum = self.momentum_tracker.get_momentum()
+        is_buying_yes = market_info.edge > 0
+        
+        # Only block if momentum is strongly against us
+        if is_buying_yes and momentum < -0.5:
+            return False, "STRONG_BEARISH_MOMENTUM"
+        if not is_buying_yes and momentum > 0.5:
+            return False, "STRONG_BULLISH_MOMENTUM"
+        
+        return True, "APPROVED"
+    
+    def should_exit_position(self, position: SimulatedPosition, 
+                           current_price_cents: float) -> Tuple[bool, str]:
+        """HFT exit decision logic (prices in cents, P&L in dollars)"""
+        current_time = time.time()
+        position_age = current_time - position.entry_time
+        
+        # Time-based exit (much shorter for HFT)
+        if position_age > self.params.max_position_time_seconds:
+            return True, "TIME_EXIT"
+        
+        # Calculate position value in dollars for percentage calculations
+        entry_value_dollars = (position.entry_price / 100.0) * position.quantity
+        
+        # Stop loss (P&L is already in dollars)
+        if position.unrealized_pnl < 0:
+            loss_pct = abs(position.unrealized_pnl) / entry_value_dollars
+            if loss_pct > self.params.stop_loss_pct:
+                return True, "STOP_LOSS"
+        
+        # Profit target (P&L is already in dollars)
+        if position.unrealized_pnl > 0:
+            profit_pct = position.unrealized_pnl / entry_value_dollars
+            if profit_pct > self.params.profit_target_pct:
+                return True, "PROFIT_TARGET"
+        
+        # Trailing stop (P&L is already in dollars)
+        if position.peak_pnl > 0:
+            drawdown_from_peak = position.peak_pnl - position.unrealized_pnl
+            drawdown_pct = drawdown_from_peak / entry_value_dollars
+            if drawdown_pct > self.params.trailing_stop_pct:
+                return True, "TRAILING_STOP"
+        
+        return False, "HOLD"
+
+class HFTradingSimulator:
+    """High-frequency trading simulator"""
     
     def __init__(self, starting_balance: float = 10000.0):
         self.portfolio = SimulatedPortfolio(starting_balance, starting_balance)
+        self.params = HFTradingParams()
+        self.risk_manager = HFRiskManager(self.params)
         self.trade_log = []
-        self.params = TradingParams()
         
-    def can_open_position(self, market_ticker: str, side: str, price: float, quantity: int) -> bool:
-        """Check if we can open a new position"""
-        # Check if we already have a position in this market
-        if market_ticker in self.portfolio.positions:
-            existing_pos = self.portfolio.positions[market_ticker]
-            # Don't open opposing positions
-            if existing_pos.side != side:
-                return False
-            # Don't exceed max position size
-            if existing_pos.quantity + quantity > self.params.max_position_per_market:
-                return False
+        # HFT-specific tracking
+        self.last_price_update = 0
+        self.price_changed = False
+        self.last_btc_price = None
         
-        # Check if we have enough balance
-        required_capital = price * quantity
-        return self.portfolio.current_balance >= required_capital
+    def get_portfolio_state(self) -> Dict:
+        """Get current portfolio state"""
+        total_exposure = sum(
+            pos.entry_price * pos.quantity 
+            for pos in self.portfolio.positions.values()
+        )
+        
+        return {
+            'total_value': self.portfolio.get_total_value(),
+            'position_count': len(self.portfolio.positions),
+            'total_exposure': total_exposure,
+            'available_cash': self.portfolio.current_balance,
+            'unrealized_pnl': self.portfolio.total_unrealized_pnl
+        }
     
-    def execute_simulated_trade(self, market_ticker: str, action: str, market_data: Any) -> Optional[Dict]:
-        """Execute a simulated trade based on action and market data"""
-        if not market_data or not market_data.yes_ask or not market_data.yes_bid:
-            return None
+    def update_price(self, btc_price: float):
+        """Update BTC price for momentum tracking"""
+        if self.last_btc_price is None:
+            self.last_btc_price = btc_price
+            return
         
-        # Determine trade parameters
-        if action == "BUY_YES":
+        # Check if price changed significantly
+        price_change_pct = abs(btc_price - self.last_btc_price) / self.last_btc_price
+        if price_change_pct > self.params.price_change_threshold:
+            self.price_changed = True
+        
+        self.risk_manager.update_price(btc_price)
+        self.last_btc_price = btc_price
+        self.last_price_update = time.time()
+    
+    def execute_hft_trade(self, market_info, btc_price: float) -> Optional[Dict]:
+        """Execute high-frequency trade (prices in CENTS 0-100)"""
+        portfolio_state = self.get_portfolio_state()
+        
+        # Check if we should enter
+        should_enter, reason = self.risk_manager.should_enter_trade(
+            market_info, btc_price, portfolio_state
+        )
+        
+        if not should_enter:
+            return {"status": "REJECTED", "reason": reason}
+        
+        # Calculate position size in contracts
+        confidence = self._calculate_confidence(market_info)
+        contracts = self.risk_manager.calculate_position_size(
+            market_info.edge, confidence, portfolio_state['total_value']
+        )
+        
+        # Determine trade parameters (prices are in cents)
+        if market_info.edge > 0:
             side = "YES"
-            price = market_data.yes_ask  # We pay the ask
+            price_cents = market_info.market_data.yes_ask  # Price in cents (0-100)
             trade_type = "BUY"
-        elif action == "SELL_YES":
-            side = "YES"
-            price = market_data.yes_bid  # We receive the bid
+        else:
+            side = "YES"  # We'll sell YES if edge is negative
+            price_cents = market_info.market_data.yes_bid  # Price in cents (0-100)
             trade_type = "SELL"
-        else:
-            return None
         
-        # Calculate position size
-        target_dollars = self.params.position_size_dollars
-        quantity = max(1, int(target_dollars / price))
+        if not price_cents or price_cents <= 0 or price_cents > 100:
+            return {"status": "REJECTED", "reason": "INVALID_PRICE"}
         
-        # Check if trade is possible
+        # Convert cents to dollars for cost calculation
+        price_dollars = price_cents / 100.0
+        
+        # Check affordability (cost is in dollars)
         if trade_type == "BUY":
-            if not self.can_open_position(market_ticker, side, price, quantity):
-                return None
-            return self._open_position(market_ticker, side, price, quantity)
-        else:  # SELL
-            return self._close_position(market_ticker, side, price, quantity)
-    
-    def _open_position(self, market_ticker: str, side: str, price: float, quantity: int) -> Dict:
-        """Open a new position or add to existing one"""
-        cost = price * quantity
+            cost_dollars = price_dollars * contracts
+            if cost_dollars > self.portfolio.current_balance:
+                # Reduce contracts to what we can afford
+                contracts = max(1, int(self.portfolio.current_balance / price_dollars))
+                cost_dollars = price_dollars * contracts
+                if cost_dollars > self.portfolio.current_balance:
+                    return {"status": "REJECTED", "reason": "INSUFFICIENT_FUNDS"}
         
-        if market_ticker in self.portfolio.positions:
-            # Add to existing position
-            existing_pos = self.portfolio.positions[market_ticker]
-            total_cost = existing_pos.entry_price * existing_pos.quantity + cost
-            total_quantity = existing_pos.quantity + quantity
-            avg_price = total_cost / total_quantity
+        # Execute the trade
+        trade_result = self._execute_trade(market_info.ticker, side, price_cents, contracts, trade_type)
+        
+        if trade_result:
+            self.risk_manager.record_trade(market_info.ticker)
+        
+        return trade_result
+    
+    def _execute_trade(self, ticker: str, side: str, price_cents: float, 
+                      quantity: int, trade_type: str) -> Dict:
+        """Execute the actual trade (price_cents is 0-100, convert to dollars for costs)"""
+        current_time = time.time()
+        price_dollars = price_cents / 100.0  # Convert cents to dollars
+        
+        if trade_type == "BUY":
+            # Open position
+            cost_dollars = price_dollars * quantity
             
-            existing_pos.quantity = total_quantity
-            existing_pos.entry_price = avg_price
-        else:
-            # Create new position
-            self.portfolio.positions[market_ticker] = SimulatedPosition(
-                market_ticker=market_ticker,
+            if ticker in self.portfolio.positions:
+                # Add to existing position (keep entry price in cents for consistency)
+                existing_pos = self.portfolio.positions[ticker]
+                existing_cost_dollars = (existing_pos.entry_price / 100.0) * existing_pos.quantity
+                total_cost_dollars = existing_cost_dollars + cost_dollars
+                total_quantity = existing_pos.quantity + quantity
+                avg_price_cents = (total_cost_dollars / total_quantity) * 100  # Back to cents
+                
+                existing_pos.quantity = total_quantity
+                existing_pos.entry_price = avg_price_cents
+            else:
+                # Create new position (store price in cents)
+                self.portfolio.positions[ticker] = SimulatedPosition(
+                    market_ticker=ticker,
+                    side=side,
+                    quantity=quantity,
+                    entry_price=price_cents,  # Store in cents
+                    entry_time=current_time
+                )
+            
+            self.portfolio.current_balance -= cost_dollars
+            
+            trade_info = {
+                "type": "OPEN",
+                "market": ticker,
+                "side": side,
+                "quantity": quantity,
+                "price": price_cents,  # Store in cents for consistency
+                "cost": cost_dollars,  # Cost in dollars
+                "timestamp": current_time
+            }
+        
+        else:  # SELL
+            # Close position
+            if ticker not in self.portfolio.positions:
+                return {"status": "ERROR", "reason": "NO_POSITION"}
+            
+            position = self.portfolio.positions[ticker]
+            quantity = min(quantity, position.quantity)
+            
+            # Calculate P&L (both prices in cents, convert result to dollars)
+            pnl_cents_per_contract = price_cents - position.entry_price
+            pnl_dollars = (pnl_cents_per_contract / 100.0) * quantity
+            proceeds_dollars = price_dollars * quantity
+            
+            self.portfolio.current_balance += proceeds_dollars
+            self.portfolio.total_realized_pnl += pnl_dollars
+            
+            # Update position
+            if quantity == position.quantity:
+                del self.portfolio.positions[ticker]
+            else:
+                position.quantity -= quantity
+            
+            # Record completed trade
+            completed_trade = SimulatedTrade(
+                market_ticker=ticker,
                 side=side,
                 quantity=quantity,
-                entry_price=price,
-                entry_time=time.time()
+                entry_price=position.entry_price,  # In cents
+                exit_price=price_cents,  # In cents
+                entry_time=position.entry_time,
+                exit_time=current_time,
+                realized_pnl=pnl_dollars,  # In dollars
+                trade_type="SELL",
+                exit_reason="MANUAL"
             )
-        
-        self.portfolio.current_balance -= cost
-        
-        trade_info = {
-            "type": "OPEN",
-            "market": market_ticker,
-            "side": side,
-            "quantity": quantity,
-            "price": price,
-            "cost": cost,
-            "timestamp": time.time()
-        }
+            self.portfolio.completed_trades.append(completed_trade)
+            
+            trade_info = {
+                "type": "CLOSE",
+                "market": ticker,
+                "side": side,
+                "quantity": quantity,
+                "price": price_cents,  # In cents
+                "proceeds": proceeds_dollars,  # In dollars
+                "pnl": pnl_dollars,  # In dollars
+                "timestamp": current_time
+            }
         
         self.trade_log.append(trade_info)
         return trade_info
     
-    def _close_position(self, market_ticker: str, side: str, price: float, quantity: int) -> Optional[Dict]:
-        """Close part or all of a position"""
-        if market_ticker not in self.portfolio.positions:
-            return None
+    def _calculate_confidence(self, market_info) -> float:
+        """Calculate trading confidence score"""
+        confidence = 1.0
         
-        position = self.portfolio.positions[market_ticker]
-        if position.side != side:
-            return None
+        # Spread penalty
+        if market_info.spread_pct:
+            if market_info.spread_pct > 8:
+                confidence *= 0.7
+            elif market_info.spread_pct > 5:
+                confidence *= 0.85
         
-        # Determine how much we can actually sell
-        quantity = min(quantity, position.quantity)
-        if quantity <= 0:
-            return None
+        # Primary market bonus
+        if market_info.is_primary:
+            confidence *= 1.1
         
-        # Calculate P&L
-        if side == "YES":
-            pnl = (price - position.entry_price) * quantity
-        else:  # NO
-            pnl = (position.entry_price - price) * quantity
+        # Volatility adjustment
+        volatility = self.risk_manager.momentum_tracker.get_volatility()
+        if volatility > 1.5:
+            confidence *= 0.8
         
-        proceeds = price * quantity
-        self.portfolio.current_balance += proceeds
-        self.portfolio.total_realized_pnl += pnl
+        return min(1.0, max(0.1, confidence))
+    
+    def check_exits(self) -> List[Tuple[str, str]]:
+        """Check all positions for exit conditions"""
+        exits_needed = []
         
-        # Create completed trade record
-        completed_trade = SimulatedTrade(
-            market_ticker=market_ticker,
-            side=side,
-            quantity=quantity,
-            entry_price=position.entry_price,
-            exit_price=price,
-            entry_time=position.entry_time,
-            exit_time=time.time(),
-            realized_pnl=pnl,
-            trade_type="SELL"
-        )
-        self.portfolio.completed_trades.append(completed_trade)
+        for ticker, position in self.portfolio.positions.items():
+            current_price_cents = position.current_price or position.entry_price
+            should_exit, reason = self.risk_manager.should_exit_position(position, current_price_cents)
+            
+            if should_exit:
+                exits_needed.append((ticker, reason))
         
-        # Update position
-        if quantity == position.quantity:
-            # Close entire position
-            del self.portfolio.positions[market_ticker]
-        else:
-            # Reduce position size
-            position.quantity -= quantity
-        
-        trade_info = {
-            "type": "CLOSE",
-            "market": market_ticker,
-            "side": side,
-            "quantity": quantity,
-            "price": price,
-            "proceeds": proceeds,
-            "pnl": pnl,
-            "timestamp": time.time()
-        }
-        
-        self.trade_log.append(trade_info)
-        return trade_info
+        return exits_needed
     
     def update_positions(self, market_data_dict: Dict[str, Any]):
-        """Update all positions with current market prices"""
+        """Update all positions with current market prices (in cents)"""
         for ticker, position in self.portfolio.positions.items():
             if ticker in market_data_dict:
                 market_data = market_data_dict[ticker]
                 if market_data and market_data.yes_bid and market_data.yes_ask:
-                    # Use mid price for marking positions
-                    mid_price = (market_data.yes_bid + market_data.yes_ask) / 2
-                    position.update_current_price(mid_price)
+                    # Use mid price in cents for marking positions
+                    mid_price_cents = (market_data.yes_bid + market_data.yes_ask) / 2
+                    position.update_current_price(mid_price_cents)
         
         self.portfolio.update_unrealized_pnl()
     
@@ -283,8 +552,7 @@ class TradingSimulator:
             "total_trades": len(self.trade_log)
         }
 
-# [Include all the existing classes from kalshirunner.py here - BTCPriceMonitor, BRTIManager, MarketAnalyzer, DisplayManager]
-
+# Keep existing classes from original file
 class BTCPriceMonitor:
     """Optimized BTC price monitoring with caching"""
     def __init__(self, price_file: str = "aggregate_price.json"):
@@ -292,7 +560,7 @@ class BTCPriceMonitor:
         self.last_price = None
         self.last_modified = None
         self.last_check = 0
-        self.check_interval = 0.5
+        self.check_interval = 0.1  # Faster checking for HFT
         self.price_history = []
         self.max_history_minutes = 30
     
@@ -335,7 +603,7 @@ class BTCPriceMonitor:
         cutoff_time = current_time - (self.max_history_minutes * 60)
         self.price_history = [(t, p) for t, p in self.price_history if t > cutoff_time]
     
-    def calculate_volatility(self, window_minutes: int = 15) -> float:
+    def calculate_volatility(self, window_minutes: int = 5) -> float:  # Shorter window for HFT
         cutoff_time = time.time() - (window_minutes * 60)
         recent_history = [(t, p) for t, p in self.price_history if t > cutoff_time]
         
@@ -384,7 +652,7 @@ class BRTIManager:
             )
             
             # Wait for initialization
-            for _ in range(30):  # 30 second timeout
+            for _ in range(30):
                 if self.price_file.exists():
                     try:
                         with open(self.price_file, 'r') as f:
@@ -417,8 +685,8 @@ class BRTIManager:
             self.process = None
 
 class MarketAnalyzer:
-    """Separated market analysis logic"""
-    def __init__(self, params: TradingParams):
+    """Market analysis logic optimized for HFT"""
+    def __init__(self, params: HFTradingParams):
         self.params = params
     
     @staticmethod
@@ -432,22 +700,20 @@ class MarketAnalyzer:
         return 0.0
     
     def calculate_adaptive_market_count(self, volatility: float, time_to_expiry_hours: float) -> int:
-        base_count = self.params.base_market_count
+        # Conservative market selection for focused trading (max 3 positions)
+        base_count = 3
         
-        # Volatility adjustments
-        if volatility > self.params.volatility_threshold_high:
-            base_count += 3
-        elif volatility > self.params.volatility_threshold_low:
+        # Only increase in high volatility situations
+        if volatility > 1.5:
+            base_count = 4
+        elif volatility > 1.0:
+            base_count = 3
+        
+        # Slight increase near expiry for more opportunities
+        if time_to_expiry_hours < 0.5:  # 30 minutes
             base_count += 1
         
-        # Time decay adjustments
-        time_adjustments = {1: 3, 3: 2, 6: 1}
-        for threshold, adjustment in time_adjustments.items():
-            if time_to_expiry_hours < threshold:
-                base_count += adjustment
-                break
-        
-        return min(base_count, self.params.max_markets)
+        return min(base_count, 5)  # Never more than 5 markets to choose from
     
     def select_target_markets(self, markets: List[Dict], btc_price: float, volatility: float) -> List[MarketInfo]:
         if not markets or not btc_price:
@@ -546,16 +812,20 @@ class MarketAnalyzer:
         if abs(market_info.edge) < self.params.min_edge_threshold:
             return "INSUFFICIENT_EDGE"
         
-        # Determine direction based on position and edge
-        if btc_price > market_info.strike:
-            return "BUY_YES" if market_info.edge > self.params.min_edge_threshold else "SELL_YES"
+        # Determine direction based on edge
+        if market_info.edge > self.params.min_edge_threshold:
+            return "BUY_YES"
+        elif market_info.edge < -self.params.min_edge_threshold:
+            return "SELL_YES"
         else:
-            return "SELL_YES" if market_info.edge > self.params.min_edge_threshold else "BUY_YES"
+            return "HOLD"
 
 class DisplayManager:
-    """Enhanced display manager with simulation stats"""
+    """Enhanced display manager for HFT"""
     def __init__(self):
         self.display_line_count = 0
+        self.last_update_time = 0
+        self.update_interval = 0.2  # Faster updates for HFT
     
     def clear_display(self):
         if self.display_line_count > 0:
@@ -567,6 +837,10 @@ class DisplayManager:
             self.display_line_count = 0
     
     def update_multiline_display(self, lines: list):
+        current_time = time.time()
+        if current_time - self.last_update_time < self.update_interval:
+            return  # Skip update to reduce flicker
+        
         self.clear_display()
         
         for i, line in enumerate(lines):
@@ -576,6 +850,7 @@ class DisplayManager:
         
         sys.stdout.flush()
         self.display_line_count = len(lines)
+        self.last_update_time = current_time
     
     def print_new_line(self, line: str):
         self.clear_display()
@@ -584,7 +859,7 @@ class DisplayManager:
     
     def format_market_display(self, active_markets: List[MarketInfo], btc_price: float, 
                             volatility: float, brti_running: bool, portfolio_summary: Dict) -> List[str]:
-        """Generate display with portfolio information"""
+        """Generate display with HFT portfolio information"""
         try:
             edt_time = datetime.now(ZoneInfo("America/New_York"))
         except ImportError:
@@ -592,70 +867,77 @@ class DisplayManager:
         
         lines = []
         
-        # Header with portfolio info
+        # Header with HFT indicators
         vol_indicator = "🔥" if volatility > 1.0 else "📈" if volatility > 0.5 else "📊"
         brti_status = "🟢" if brti_running else "🔴"
         
-        header = (f"{edt_time.strftime('%H:%M:%S')} | "
+        header = (f"{edt_time.strftime('%H:%M:%S.%f')[:-3]} | "  # Include milliseconds
                  f"BTC: ${btc_price:,.2f} | "
                  f"Vol: {volatility:.1%} {vol_indicator} | "
                  f"Markets: {len(active_markets)} | "
                  f"BRTI: {brti_status}")
         lines.append(header)
         
-        # Portfolio summary line
-        portfolio_line = (f"📊 Portfolio: ${portfolio_summary['total_value']:,.2f} "
-                         f"({portfolio_summary['total_return_pct']:+.1f}%) | "
-                         f"Positions: {portfolio_summary['open_positions']} | "
+        # HFT Portfolio summary line
+        pnl_indicator = "🟢" if portfolio_summary['total_return_pct'] > 0 else "🔴" if portfolio_summary['total_return_pct'] < 0 else "⚪"
+        portfolio_line = (f"💰 ${portfolio_summary['total_value']:,.2f} "
+                         f"({portfolio_summary['total_return_pct']:+.2f}%) {pnl_indicator} | "
+                         f"Pos: {portfolio_summary['open_positions']}/3 | "  # Show max 3 positions
                          f"Trades: {portfolio_summary['completed_trades']} | "
-                         f"P&L: ${portfolio_summary['realized_pnl']:+,.2f}")
+                         f"R-PnL: ${portfolio_summary['realized_pnl']:+,.2f} | "
+                         f"U-PnL: ${portfolio_summary['unrealized_pnl']:+,.2f}")
         lines.append(portfolio_line)
         
-        # Market ladder
+        # Market ladder with HFT indicators
         if active_markets:
             sorted_markets = sorted(active_markets, key=lambda m: m.strike)
-            strike_labels = [
-                f"${m.strike:,.0f}🎯" if m.is_primary else f"${m.strike:,.0f}"
-                for m in sorted_markets
-            ]
+            strike_labels = []
+            for m in sorted_markets:
+                label = f"${m.strike:,.0f}"
+                if m.is_primary:
+                    label += "🎯"
+                if m.action in ["BUY_YES", "SELL_YES"]:
+                    label += "⚡"  # HFT opportunity indicator
+                strike_labels.append(label)
             lines.append(f"Ladder: {' | '.join(strike_labels)}")
         
-        # Individual markets with simulation actions
+        # Individual markets with HFT metrics
         opportunities = 0
         if active_markets:
             sorted_markets = sorted(active_markets, key=lambda m: m.strike)
             
             for market in sorted_markets:
                 if market.market_data:
-                    line = self._format_market_line(market)
+                    line = self._format_hft_market_line(market)
                     lines.append(line)
                     
                     if market.action in ["BUY_YES", "SELL_YES"]:
                         opportunities += 1
         
-        # Opportunities summary
+        # HFT Opportunities summary
         if opportunities:
-            lines.append(f"🚨 {opportunities} TRADING OPPORTUNITIES")
+            lines.append(f"⚡ {opportunities} HFT OPPORTUNITIES DETECTED")
         
         return lines
     
-    def _format_market_line(self, market: MarketInfo) -> str:
+    def _format_hft_market_line(self, market: MarketInfo) -> str:
         data = market.market_data
         primary_indicator = "🎯" if market.is_primary else "  "
         
         action_emoji = {
-            "BUY_YES": "🟢", "SELL_YES": "🔴", "HOLD": "⚪",
+            "BUY_YES": "🟢⚡", "SELL_YES": "🔴⚡", "HOLD": "⚪",
             "SPREAD_TOO_WIDE": "📏", "INSUFFICIENT_EDGE": "⚖️", "NO_DATA": "❓"
         }.get(market.action, "⚪")
         
         if data.yes_bid and data.yes_ask:
-            yes_prices = f"YES: {data.yes_bid:.0f}/{data.yes_ask:.0f}"
+            # Prices are in cents (0-100), display as cents
+            yes_prices = f"YES: {data.yes_bid:.0f}¢/{data.yes_ask:.0f}¢"
             no_bid, no_ask = 100 - data.yes_ask, 100 - data.yes_bid
-            no_prices = f"NO: {no_bid:.0f}/{no_ask:.0f}"
-            spread_text = f"Spread: {market.spread:.0f}¢" if market.spread else ""
+            no_prices = f"NO: {no_bid:.0f}¢/{no_ask:.0f}¢"
+            spread_text = f"Spr: {market.spread:.0f}¢" if market.spread else ""
         else:
-            yes_prices = "YES: --/--"
-            no_prices = "NO: --/--"
+            yes_prices = "YES: --¢/--¢"
+            no_prices = "NO: --¢/--¢"
             spread_text = "No data"
         
         line = (f"{primary_indicator}${market.strike:,.0f}: "
@@ -666,17 +948,17 @@ class DisplayManager:
         
         return line + f" {action_emoji}"
 
-class VolatilityAdaptiveSimulator:
-    """Main simulator class with trading simulation"""
+class VolatilityAdaptiveHFTrader:
+    """High-frequency trading main class"""
     def __init__(self, event_id: Optional[str] = None, starting_balance: float = 10000.0):
         self.event_id = event_id or self._generate_current_event_id()
         self.client = KalshiClient()
         self.btc_monitor = BTCPriceMonitor()
         self.brti_manager = BRTIManager()
-        self.params = TradingParams()
+        self.params = HFTradingParams()
         self.analyzer = MarketAnalyzer(self.params)
         self.display = DisplayManager()
-        self.simulator = TradingSimulator(starting_balance)
+        self.simulator = HFTradingSimulator(starting_balance)
         
         # State
         self.markets = []
@@ -686,13 +968,18 @@ class VolatilityAdaptiveSimulator:
         self.current_volatility = 0.0
         self.shutdown_requested = False
         
+        # HFT-specific state
+        self.last_trade_opportunity_check = 0
+        self.trade_opportunity_interval = 0.1  # Check every 100ms
+        self.last_exit_check = 0
+        self.exit_check_interval = 0.5  # Check exits every 500ms
+        
         # Statistics
         self.btc_updates = 0
         self.market_updates = 0
         self.volatility_updates = 0
-        self.last_market_update_time = None
-        self.last_trade_check = 0
-        self.trade_cooldown = 5.0  # Wait 5 seconds between trades
+        self.trade_opportunities = 0
+        self.trades_executed = 0
         
         self._setup_signal_handlers()
         self._silence_client_output()
@@ -731,8 +1018,9 @@ class VolatilityAdaptiveSimulator:
             builtins.print = self._original_print
     
     async def initialize(self) -> bool:
-        print("🚀 KBTCH Simulator Starting...")
+        print("🚀 KBTCH HFT Simulator Starting...")
         print(f"💰 Starting Balance: ${self.simulator.portfolio.starting_balance:,.2f}")
+        print("⚡ High-Frequency Trading Mode Enabled")
         
         # Start BRTI
         if not self.brti_manager.is_brti_running():
@@ -752,6 +1040,7 @@ class VolatilityAdaptiveSimulator:
                 btc_price = self.btc_monitor.get_current_price()
                 if btc_price:
                     self.last_btc_price = btc_price
+                    self.simulator.update_price(btc_price)
                     break
                 await asyncio.sleep(1)
             else:
@@ -768,6 +1057,7 @@ class VolatilityAdaptiveSimulator:
                 return False
             
             print(f"✅ Ready: {len(self.markets)} markets, BTC ${btc_price:,.0f}")
+            print(f"🎯 Monitoring {len(self.active_markets)} active markets")
             return True
             
         except Exception as e:
@@ -794,31 +1084,56 @@ class VolatilityAdaptiveSimulator:
         
         self.active_markets = target_markets
     
-    def _execute_trading_logic(self):
-        """Execute simulated trades based on market analysis"""
+    def _execute_hft_trading_logic(self):
+        """Execute high-frequency trading logic"""
         current_time = time.time()
-        if current_time - self.last_trade_check < self.trade_cooldown:
-            return
         
-        self.last_trade_check = current_time
-        
-        for market in self.active_markets:
-            if market.action in ["BUY_YES", "SELL_YES"] and market.market_data:
-                trade_result = self.simulator.execute_simulated_trade(
-                    market.ticker, market.action, market.market_data
-                )
-                
-                if trade_result:
-                    # Log the trade
-                    action_desc = "🟢 BOUGHT" if trade_result["type"] == "OPEN" else "🔴 SOLD"
-                    self.display.print_new_line(
-                        f"{action_desc} {trade_result['quantity']} {market.ticker} "
-                        f"@ ${trade_result['price']:.0f} "
-                        f"({trade_result.get('pnl', trade_result.get('cost', 0)):+.2f})"
-                    )
+        # Check for trade opportunities more frequently
+        if current_time - self.last_trade_opportunity_check >= self.trade_opportunity_interval:
+            self.last_trade_opportunity_check = current_time
+            
+            for market in self.active_markets:
+                if market.action in ["BUY_YES", "SELL_YES"] and market.market_data:
+                    self.trade_opportunities += 1
                     
-                    # Brief pause to show the trade
-                    time.sleep(1)
+                    trade_result = self.simulator.execute_hft_trade(market, self.last_btc_price)
+                    
+                    if trade_result and trade_result.get("status") != "REJECTED":
+                        self.trades_executed += 1
+                        # Brief display of trade
+                        action_desc = "🟢⚡ HFT BUY" if trade_result.get("type") == "OPEN" else "🔴⚡ HFT SELL"
+                        self.display.print_new_line(
+                            f"{action_desc} {trade_result.get('quantity', 0)} {market.ticker.split('-')[-1]} "
+                            f"@ {trade_result.get('price', 0):.0f}¢"
+                        )
+                        time.sleep(0.5)  # Brief pause to show trade
+        
+        # Check for exits less frequently but still regularly
+        if current_time - self.last_exit_check >= self.exit_check_interval:
+            self.last_exit_check = current_time
+            
+            exits_needed = self.simulator.check_exits()
+            for ticker, reason in exits_needed:
+                # Execute exit
+                if ticker in self.simulator.portfolio.positions:
+                    position = self.simulator.portfolio.positions[ticker]
+                    market_data = self.client.get_mid_prices(ticker)
+                    
+                    if market_data and market_data.yes_bid:
+                        # Force exit at current bid (price in cents)
+                        exit_result = self.simulator._execute_trade(
+                            ticker, position.side, market_data.yes_bid, 
+                            position.quantity, "SELL"
+                        )
+                        
+                        if exit_result:
+                            pnl = exit_result.get('pnl', 0)
+                            pnl_indicator = "🟢" if pnl > 0 else "🔴"
+                            self.display.print_new_line(
+                                f"{pnl_indicator}⚡ HFT EXIT {ticker.split('-')[-1]} "
+                                f"${pnl:+.2f} ({reason})"
+                            )
+                            time.sleep(0.5)
     
     async def run_trading_loop(self):
         if not await self.initialize():
@@ -828,7 +1143,6 @@ class VolatilityAdaptiveSimulator:
         original_handler = self.client._handle_ws_message
         def counting_handler(msg):
             self.market_updates += 1
-            self.last_market_update_time = time.time()
             original_handler(msg)
         self.client._handle_ws_message = counting_handler
         
@@ -838,15 +1152,16 @@ class VolatilityAdaptiveSimulator:
                 if not self.brti_manager.is_brti_running():
                     await self.brti_manager.start_brti()
                 
-                # Update BTC price
+                # Update BTC price for HFT
                 current_btc = self.btc_monitor.get_current_price()
                 if current_btc and current_btc != self.last_btc_price:
                     self.last_btc_price = current_btc
+                    self.simulator.update_price(current_btc)
                     self.btc_updates += 1
                 
                 # Update volatility
                 new_volatility = self.btc_monitor.calculate_volatility()
-                if abs(new_volatility - self.current_volatility) > 0.1:
+                if abs(new_volatility - self.current_volatility) > 0.05:  # More sensitive for HFT
                     self.current_volatility = new_volatility
                     self.volatility_updates += 1
                     await self._update_market_subscriptions()
@@ -864,13 +1179,13 @@ class VolatilityAdaptiveSimulator:
                 # Update portfolio with current prices
                 self.simulator.update_positions(market_data_dict)
                 
-                # Execute trading logic
-                self._execute_trading_logic()
+                # Execute HFT trading logic
+                self._execute_hft_trading_logic()
                 
                 # Get portfolio summary
                 portfolio_summary = self.simulator.get_portfolio_summary()
                 
-                # Display
+                # Display (with reduced frequency to minimize flicker)
                 lines = self.display.format_market_display(
                     self.active_markets, self.last_btc_price, 
                     self.current_volatility, self.brti_manager.is_brti_running(),
@@ -878,39 +1193,60 @@ class VolatilityAdaptiveSimulator:
                 )
                 self.display.update_multiline_display(lines)
                 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)  # Much faster loop for HFT
                 
         except KeyboardInterrupt:
-            self.display.print_new_line("\n🛑 Shutting down...")
+            self.display.print_new_line("\n🛑 Shutting down HFT trader...")
         except Exception as e:
-            self.display.print_new_line(f"\n❌ Error: {e}")
+            self.display.print_new_line(f"\n❌ HFT Error: {e}")
         finally:
             await self._cleanup()
     
     async def _cleanup(self):
         self._restore_client_output()
         
-        # Print final portfolio summary
+        # Print final HFT summary
         summary = self.simulator.get_portfolio_summary()
-        print("\n" + "="*60)
-        print("FINAL PORTFOLIO SUMMARY")
-        print("="*60)
+        print("\n" + "="*70)
+        print("FINAL HFT PORTFOLIO SUMMARY")
+        print("="*70)
         print(f"Starting Balance: ${summary['starting_balance']:,.2f}")
         print(f"Final Value: ${summary['total_value']:,.2f}")
-        print(f"Total Return: ${summary['total_value'] - summary['starting_balance']:+,.2f} ({summary['total_return_pct']:+.1f}%)")
+        print(f"Total Return: ${summary['total_value'] - summary['starting_balance']:+,.2f} ({summary['total_return_pct']:+.2f}%)")
         print(f"Realized P&L: ${summary['realized_pnl']:+,.2f}")
         print(f"Unrealized P&L: ${summary['unrealized_pnl']:+,.2f}")
-        print(f"Max Drawdown: {summary['max_drawdown_pct']:.1f}%")
+        print(f"Max Drawdown: {summary['max_drawdown_pct']:.2f}%")
         print(f"Completed Trades: {summary['completed_trades']}")
         print(f"Open Positions: {summary['open_positions']}")
         
+        # HFT-specific stats
+        print(f"\n⚡ HFT PERFORMANCE")
+        print(f"Trade Opportunities: {self.trade_opportunities}")
+        print(f"Trades Executed: {self.trades_executed}")
+        print(f"Execution Rate: {(self.trades_executed/max(1,self.trade_opportunities)*100):.1f}%")
+        print(f"BTC Price Updates: {self.btc_updates}")
+        print(f"Market Data Updates: {self.market_updates}")
+        
+        if summary['completed_trades'] > 0:
+            avg_trade_duration = sum([
+                t.exit_time - t.entry_time 
+                for t in self.simulator.portfolio.completed_trades
+            ]) / summary['completed_trades']
+            print(f"Avg Trade Duration: {avg_trade_duration:.1f} seconds")
+        
         # Save trade log
         if self.simulator.trade_log:
-            log_file = f"simulation_log_{int(time.time())}.json"
+            log_file = f"hft_simulation_log_{int(time.time())}.json"
             with open(log_file, 'w') as f:
                 json.dump({
                     'summary': summary,
                     'trades': self.simulator.trade_log,
+                    'hft_stats': {
+                        'trade_opportunities': self.trade_opportunities,
+                        'trades_executed': self.trades_executed,
+                        'btc_updates': self.btc_updates,
+                        'market_updates': self.market_updates
+                    },
                     'final_positions': {
                         k: {
                             'ticker': v.market_ticker,
@@ -918,11 +1254,12 @@ class VolatilityAdaptiveSimulator:
                             'quantity': v.quantity,
                             'entry_price': v.entry_price,
                             'current_price': v.current_price,
-                            'unrealized_pnl': v.unrealized_pnl
+                            'unrealized_pnl': v.unrealized_pnl,
+                            'peak_pnl': v.peak_pnl
                         } for k, v in self.simulator.portfolio.positions.items()
                     }
                 }, f, indent=2)
-            print(f"Trade log saved: {log_file}")
+            print(f"HFT Trade log saved: {log_file}")
         
         self.brti_manager.stop_brti()
         try:
@@ -931,7 +1268,7 @@ class VolatilityAdaptiveSimulator:
             pass
 
 async def main():
-    """Entry point for simulation mode"""
+    """Entry point for HFT simulation mode"""
     # Check dependencies
     missing_deps = []
     dependencies = ['ccxt', 'numpy', 'kalshi_bot.kalshi_client']
@@ -960,31 +1297,39 @@ async def main():
     starting_balance = 10000.0
     
     if len(sys.argv) > 1:
-        # First argument: event_id (optional)
         event_id = sys.argv[1]
         
     if len(sys.argv) > 2:
-        # Second argument: starting_balance (optional)
         try:
             starting_balance = float(sys.argv[2])
         except ValueError:
             print("Invalid starting balance, using $10,000")
     
-    # Show usage info
-    if event_id:
-        print(f"🎯 Using specified event: {event_id}")
-    else:
-        print("🎯 Using auto-generated current hour event")
+    # Show HFT mode info
+    print("⚡ HIGH-FREQUENCY TRADING MODE")
+    print(f"🎯 Event: {event_id or 'Auto-generated current hour'}")
+    print(f"💰 Starting Balance: ${starting_balance:,.2f}")
+    print("📊 HFT Parameters:")
+    print("   - Max Position Time: 5 minutes")
+    print("   - Stop Loss: 8%")
+    print("   - Profit Target: 12%")
+    print("   - Trailing Stop: 4%")
+    print("   - Min Edge: 3%")
+    print("   - Position Size: 10-50 contracts")
+    print("   - Max Positions: 3 (focused trading)")
+    print("   - Max Exposure: 30%")
+    print("   - Prices: Displayed in cents (0-100¢)")
+    print("   - Contract Cost: Price in cents = $0.XX per contract")
     
-    simulator = VolatilityAdaptiveSimulator(event_id=event_id, starting_balance=starting_balance)
+    hft_trader = VolatilityAdaptiveHFTrader(event_id=event_id, starting_balance=starting_balance)
     try:
-        await simulator.run_trading_loop()
+        await hft_trader.run_trading_loop()
     except Exception as e:
         print(f"\n💥 Fatal error: {e}")
     finally:
         try:
-            if hasattr(simulator, 'brti_manager'):
-                simulator.brti_manager.stop_brti()
+            if hasattr(hft_trader, 'brti_manager'):
+                hft_trader.brti_manager.stop_brti()
         except:
             pass
 
@@ -992,7 +1337,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Goodbye!")
+        print("\n👋 HFT Session Ended!")
     except Exception as e:
         print(f"\n💥 Startup error: {e}")
         sys.exit(1)
