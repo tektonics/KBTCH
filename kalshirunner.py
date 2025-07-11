@@ -1,4 +1,4 @@
-# refactored_kalshirunner.py
+# kalshirunner.py - Simplified display with integrated trading engine
 import asyncio
 import json
 import time
@@ -14,6 +14,14 @@ from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from kalshi_bot.kalshi_client import KalshiClient
 
+# Import trading system components
+from trading_engine import TradingEngine
+from trading_logic import TradingLogic, MarketDataPoint, TradingDecision
+from portfolio import Portfolio
+from risk_manager import RiskManager
+from strategy import StrategyFactory
+from config import TRADING_CONFIG
+
 @dataclass
 class MarketInfo:
     ticker: str
@@ -23,20 +31,25 @@ class MarketInfo:
     market_data: Optional[Any] = None
     spread: Optional[float] = None
     spread_pct: Optional[float] = None
-    implied_prob: Optional[float] = None
-    edge: Optional[float] = None
-    action: str = "HOLD"
 
 @dataclass
 class TradingParams:
-    """Consolidated trading parameters"""
+    """Simplified trading parameters"""
     base_market_count: int = 3
     volatility_threshold_low: float = 0.5
     volatility_threshold_high: float = 1.0
     max_markets: int = 7
-    min_edge_threshold: float = 0.05
-    max_spread_threshold: int = 8
-    max_risk_per_trade: float = 0.02
+
+@dataclass
+class TradeExecutionInfo:
+    """Information about executed trades"""
+    ticker: str
+    action: str
+    quantity: int
+    price: float
+    status: str
+    timestamp: datetime
+    reason: str
 
 class BTCPriceMonitor:
     """Optimized BTC price monitoring with caching"""
@@ -169,8 +182,8 @@ class BRTIManager:
         finally:
             self.process = None
 
-class MarketAnalyzer:
-    """Separated market analysis logic"""
+class MarketSelector:
+    """Simple market selection logic"""
     def __init__(self, params: TradingParams):
         self.params = params
     
@@ -239,76 +252,6 @@ class MarketAnalyzer:
             )
             for m in selected
         ]
-    
-    def estimate_theoretical_probability(self, strike: float, current_price: float, 
-                                       volatility: float, time_hours: float = 1.0) -> float:
-        if strike <= 0 or current_price <= 0 or time_hours <= 0:
-            return 0.5
-        
-        price_ratio = current_price / strike
-        log_ratio = np.log(price_ratio)
-        vol_sqrt_time = volatility * np.sqrt(time_hours / 8760)
-        
-        if vol_sqrt_time <= 0:
-            return 1.0 if current_price > strike else 0.0
-        
-        z_score = log_ratio / vol_sqrt_time
-        prob = 0.5 * (1 + np.tanh(z_score / np.sqrt(2)))
-        
-        return max(0.01, min(0.99, prob))
-    
-    def analyze_market_opportunity(self, market_info: MarketInfo, btc_price: float, volatility: float) -> MarketInfo:
-        if not market_info.market_data:
-            return market_info
-        
-        data = market_info.market_data
-        
-        # Calculate spread
-        if data.yes_bid and data.yes_ask:
-            market_info.spread = data.yes_ask - data.yes_bid
-            market_info.spread_pct = (market_info.spread / data.yes_ask) * 100
-        
-        # Calculate implied probability
-        if btc_price > market_info.strike:
-            if data.yes_ask:
-                market_info.implied_prob = data.yes_ask / 100
-        else:
-            if data.yes_bid:
-                market_info.implied_prob = data.yes_bid / 100
-        
-        # Calculate theoretical probability and edge
-        theoretical_prob = self.estimate_theoretical_probability(
-            market_info.strike, btc_price, volatility, 1.0
-        )
-        
-        if market_info.implied_prob:
-            market_info.edge = theoretical_prob - market_info.implied_prob
-        
-        # Determine action
-        market_info.action = self._determine_trading_action(market_info, btc_price)
-        
-        return market_info
-    
-    def _determine_trading_action(self, market_info: MarketInfo, btc_price: float) -> str:
-    if not market_info.market_data or not market_info.spread_pct or not market_info.edge:
-        return "NO_DATA"
-
-    if market_info.spread_pct > self.params.max_spread_threshold:
-        return "SPREAD_TOO_WIDE"
-
-    if abs(market_info.edge) < self.params.min_edge_threshold:
-        return "INSUFFICIENT_EDGE"
-
-    if btc_price > market_info.strike:
-        if market_info.edge > self.params.min_edge_threshold:
-            return "BUY_YES"
-        else:
-            return "BUY_NO"
-    else:
-        if market_info.edge > self.params.min_edge_threshold:
-            return "BUY_NO"
-        else:
-            return "BUY_YES"
 
 class DisplayManager:
     """Handles all display operations"""
@@ -341,8 +284,10 @@ class DisplayManager:
         self.display_line_count = 0
     
     def format_market_display(self, active_markets: List[MarketInfo], btc_price: float, 
-                            volatility: float, brti_running: bool) -> List[str]:
-        """Generate all display lines"""
+                            volatility: float, brti_running: bool,
+                            portfolio_summary: Dict, recent_trades: List[TradeExecutionInfo],
+                            trading_stats: Dict) -> List[str]:
+        """Generate all display lines including trading info"""
         try:
             edt_time = datetime.now(ZoneInfo("America/New_York"))
         except ImportError:
@@ -350,16 +295,27 @@ class DisplayManager:
         
         lines = []
         
-        # Header line
+        # Header line with portfolio value
         vol_indicator = "🔥" if volatility > 1.0 else "📈" if volatility > 0.5 else "📊"
         brti_status = "🟢" if brti_running else "🔴"
+        portfolio_value = portfolio_summary.get('total_value', 0)
+        unrealized_pnl = portfolio_summary.get('unrealized_pnl', 0)
+        pnl_color = "🟢" if unrealized_pnl >= 0 else "🔴"
         
         header = (f"{edt_time.strftime('%H:%M:%S')} | "
                  f"BTC: ${btc_price:,.2f} | "
                  f"Vol: {volatility:.1%} {vol_indicator} | "
-                 f"Markets: {len(active_markets)} | "
+                 f"Portfolio: ${portfolio_value:,.2f} | "
+                 f"P&L: ${unrealized_pnl:+,.2f} {pnl_color} | "
                  f"BRTI: {brti_status}")
         lines.append(header)
+        
+        # Trading statistics line
+        if trading_stats:
+            stats_line = (f"📊 Trades Today: {trading_stats.get('total_trades', 0)} | "
+                         f"Success Rate: {trading_stats.get('success_rate', 0):.1f}% | "
+                         f"Volume: ${trading_stats.get('total_volume', 0):,.0f}")
+            lines.append(stats_line)
         
         # Market ladder
         if active_markets:
@@ -370,8 +326,7 @@ class DisplayManager:
             ]
             lines.append(f"Ladder: {' | '.join(strike_labels)}")
         
-        # Individual markets
-        opportunities = 0
+        # Individual markets with simplified data
         if active_markets:
             sorted_markets = sorted(active_markets, key=lambda m: m.strike)
             
@@ -379,13 +334,23 @@ class DisplayManager:
                 if market.market_data:
                     line = self._format_market_line(market)
                     lines.append(line)
-                    
-                    if market.action in ["BUY_YES", "SELL_YES"]:
-                        opportunities += 1
         
-        # Opportunities summary
-        if opportunities:
-            lines.append(f"🚨 {opportunities} TRADING OPPORTUNITIES")
+        # Portfolio positions
+        positions = portfolio_summary.get('positions', {})
+        if positions:
+            lines.append("📈 POSITIONS:")
+            for ticker, pos_info in positions.items():
+                pnl = pos_info.get('unrealized_pnl', 0)
+                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                lines.append(f"   {ticker}: {pos_info.get('quantity', 0)} @ ${pos_info.get('avg_price', 0):.2f} | P&L: ${pnl:+.2f} {pnl_emoji}")
+        
+        # Recent trades
+        if recent_trades:
+            lines.append("🔄 RECENT TRADES:")
+            for trade in recent_trades[-3:]:  # Show last 3 trades
+                status_emoji = "✅" if trade.status in ['filled', 'pending'] else "❌"
+                time_str = trade.timestamp.strftime('%H:%M:%S')
+                lines.append(f"   {time_str} {status_emoji} {trade.action} {trade.quantity} {trade.ticker} @ ${trade.price:.2f}")
         
         return lines
     
@@ -393,16 +358,12 @@ class DisplayManager:
         data = market.market_data
         primary_indicator = "🎯" if market.is_primary else "  "
         
-        action_emoji = {
-            "BUY_YES": "🟢", "SELL_YES": "🔴", "HOLD": "⚪",
-            "SPREAD_TOO_WIDE": "📏", "INSUFFICIENT_EDGE": "⚖️", "NO_DATA": "❓"
-        }.get(market.action, "⚪")
-        
         if data.yes_bid and data.yes_ask:
             yes_prices = f"YES: {data.yes_bid:.0f}/{data.yes_ask:.0f}"
             no_bid, no_ask = 100 - data.yes_ask, 100 - data.yes_bid
             no_prices = f"NO: {no_bid:.0f}/{no_ask:.0f}"
-            spread_text = f"Spread: {market.spread:.0f}¢" if market.spread else ""
+            spread = data.yes_ask - data.yes_bid
+            spread_text = f"Spread: {spread:.0f}¢"
         else:
             yes_prices = "YES: --/--"
             no_prices = "NO: --/--"
@@ -411,21 +372,21 @@ class DisplayManager:
         line = (f"{primary_indicator}${market.strike:,.0f}: "
                f"{yes_prices} | {no_prices} | {spread_text}")
         
-        if market.edge:
-            line += f" | Edge: {market.edge:+.1%}"
-        
-        return line + f" {action_emoji}"
+        return line
 
 class VolatilityAdaptiveTrader:
-    """Main trader class - streamlined"""
+    """Main trader class with integrated trading engine"""
     def __init__(self, event_id: Optional[str] = None):
         self.event_id = event_id or self._generate_current_event_id()
         self.client = KalshiClient()
         self.btc_monitor = BTCPriceMonitor()
         self.brti_manager = BRTIManager()
         self.params = TradingParams()
-        self.analyzer = MarketAnalyzer(self.params)
+        self.market_selector = MarketSelector(self.params)
         self.display = DisplayManager()
+        
+        # Initialize trading system
+        self._initialize_trading_system()
         
         # State
         self.markets = []
@@ -435,6 +396,11 @@ class VolatilityAdaptiveTrader:
         self.current_volatility = 0.0
         self.shutdown_requested = False
         
+        # Trading execution tracking
+        self.recent_trades: List[TradeExecutionInfo] = []
+        self.last_trading_decision_time = 0
+        self.trading_decision_interval = 5.0  # Make decisions every 5 seconds
+        
         # Statistics
         self.btc_updates = 0
         self.market_updates = 0
@@ -443,6 +409,30 @@ class VolatilityAdaptiveTrader:
         
         self._setup_signal_handlers()
         self._silence_client_output()
+    
+    def _initialize_trading_system(self):
+        """Initialize the trading engine and related components"""
+        # Create strategy
+        strategy = StrategyFactory.create_strategy('momentum', TRADING_CONFIG.get('strategy_config', {}))
+        
+        # Create risk manager
+        risk_manager = RiskManager(TRADING_CONFIG.get('risk_limits', {}))
+        
+        # Create trading logic
+        trading_config = {
+            'min_edge_threshold': 0.03,
+            'max_spread_threshold': 8.0,
+            'min_confidence_threshold': 0.6,
+            'base_position_size': 10,
+            'profit_take_pct': 15.0,
+            'stop_loss_pct': -8.0,
+            'max_hold_hours': 12
+        }
+        self.trading_logic = TradingLogic(strategy, risk_manager, trading_config)
+        
+        # Create trading engine
+        self.trading_engine = TradingEngine(mode='simulation')  # Change to 'live' for real trading
+        self.trading_engine.start()
     
     def _generate_current_event_id(self) -> str:
         try:
@@ -521,7 +511,7 @@ class VolatilityAdaptiveTrader:
             return False
     
     async def _update_market_subscriptions(self):
-        target_markets = self.analyzer.select_target_markets(
+        target_markets = self.market_selector.select_target_markets(
             self.markets, self.last_btc_price, self.current_volatility
         )
         
@@ -540,6 +530,65 @@ class VolatilityAdaptiveTrader:
         
         self.active_markets = target_markets
     
+    def _make_trading_decisions(self):
+        """Make trading decisions and execute them"""
+        if not self.last_btc_price or not self.active_markets:
+            return
+        
+        # Convert market data to trading logic format
+        market_data_points = []
+        for market in self.active_markets:
+            if market.market_data:
+                data_point = MarketDataPoint(
+                    ticker=market.ticker,
+                    strike=market.strike,
+                    yes_bid=market.market_data.yes_bid,
+                    yes_ask=market.market_data.yes_ask,
+                    no_bid=market.market_data.no_bid,
+                    no_ask=market.market_data.no_ask,
+                    price=market.market_data.price,
+                    volume_delta=market.market_data.volume_delta,
+                    timestamp=market.market_data.timestamp
+                )
+                market_data_points.append(data_point)
+        
+        if not market_data_points:
+            return
+        
+        # Get portfolio from trading engine
+        portfolio = self.trading_engine.portfolio
+        
+        # Make trading decisions
+        decisions = self.trading_logic.make_trading_decisions(
+            self.last_btc_price, market_data_points, portfolio, self.current_volatility
+        )
+        
+        # Check for exit signals
+        exit_decisions = self.trading_logic.evaluate_exit_signals(portfolio, market_data_points)
+        all_decisions = decisions + exit_decisions
+        
+        if all_decisions:
+            # Execute decisions through trading engine
+            results = self.trading_engine.process_trading_decisions(all_decisions)
+            
+            # Track executed trades for display
+            for decision, result in zip(all_decisions, results):
+                if result.get('executed', False):
+                    trade_info = TradeExecutionInfo(
+                        ticker=decision.ticker,
+                        action=decision.action,
+                        quantity=decision.quantity,
+                        price=decision.price,
+                        status=result['order_result']['status'],
+                        timestamp=datetime.now(),
+                        reason=decision.reason
+                    )
+                    self.recent_trades.append(trade_info)
+                    
+                    # Keep only last 20 trades
+                    if len(self.recent_trades) > 20:
+                        self.recent_trades = self.recent_trades[-20:]
+    
     async def run_trading_loop(self):
         if not await self.initialize():
             return
@@ -554,6 +603,8 @@ class VolatilityAdaptiveTrader:
         
         try:
             while not self.shutdown_requested:
+                current_time = time.time()
+                
                 # Monitor BRTI health
                 if not self.brti_manager.is_brti_running():
                     await self.brti_manager.start_brti()
@@ -563,6 +614,10 @@ class VolatilityAdaptiveTrader:
                 if current_btc and current_btc != self.last_btc_price:
                     self.last_btc_price = current_btc
                     self.btc_updates += 1
+                    
+                    # Update portfolio with current prices
+                    price_data = {market.ticker: current_btc for market in self.active_markets}
+                    self.trading_engine.update_market_prices(price_data)
                 
                 # Update volatility
                 new_volatility = self.btc_monitor.calculate_volatility()
@@ -571,18 +626,29 @@ class VolatilityAdaptiveTrader:
                     self.volatility_updates += 1
                     await self._update_market_subscriptions()
                 
-                # Update market data and analyze
+                # Update market data
                 for market in self.active_markets:
                     market.market_data = self.client.get_mid_prices(market.ticker)
                     if market.market_data:
-                        market = self.analyzer.analyze_market_opportunity(
-                            market, self.last_btc_price, self.current_volatility
-                        )
+                        # Calculate spread for display
+                        if market.market_data.yes_bid and market.market_data.yes_ask:
+                            market.spread = market.market_data.yes_ask - market.market_data.yes_bid
+                            market.spread_pct = (market.spread / market.market_data.yes_ask) * 100
+                
+                # Make trading decisions periodically
+                if current_time - self.last_trading_decision_time >= self.trading_decision_interval:
+                    self._make_trading_decisions()
+                    self.last_trading_decision_time = current_time
+                
+                # Get portfolio and trading stats
+                portfolio_summary = self.trading_engine.get_portfolio_summary()
+                trading_stats = self.trading_engine.get_status().get('performance', {})
                 
                 # Display
                 lines = self.display.format_market_display(
                     self.active_markets, self.last_btc_price, 
-                    self.current_volatility, self.brti_manager.is_brti_running()
+                    self.current_volatility, self.brti_manager.is_brti_running(),
+                    portfolio_summary, self.recent_trades, trading_stats
                 )
                 self.display.update_multiline_display(lines)
                 
@@ -597,6 +663,7 @@ class VolatilityAdaptiveTrader:
     
     async def _cleanup(self):
         self._restore_client_output()
+        self.trading_engine.stop()
         self.brti_manager.stop_brti()
         try:
             await self.client.close()
@@ -607,7 +674,7 @@ async def main():
     """Entry point with dependency checking"""
     # Check dependencies
     missing_deps = []
-    dependencies = ['ccxt', 'numpy', 'kalshi_bot.kalshi_client']
+    dependencies = ['ccxt', 'numpy', 'kalshi_bot.kalshi_client', 'trading_engine', 'trading_logic', 'portfolio']
     
     for dep in dependencies:
         try:
