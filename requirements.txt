@@ -1,0 +1,14 @@
+# Core trading and data packages
+ccxt>=4.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+
+# HTTP and WebSocket communication
+requests>=2.31.0
+websockets>=11.0.0
+
+# Cryptography for Kalshi API authentication
+cryptography>=41.0.0
+
+# Environment variable management
+python-dotenv>=1.0.0
