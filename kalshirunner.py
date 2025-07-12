@@ -1,4 +1,4 @@
-# kalshirunner.py - Simplified display with integrated trading engine
+# kalshirunner.py - Simplified display with integrated trading engine + signal tracking
 import asyncio
 import json
 import time
@@ -286,7 +286,7 @@ class DisplayManager:
     def format_market_display(self, active_markets: List[MarketInfo], btc_price: float, 
                             volatility: float, brti_running: bool,
                             portfolio_summary: Dict, recent_trades: List[TradeExecutionInfo],
-                            trading_stats: Dict) -> List[str]:
+                            trading_stats: Dict, signal_count: int = 0, last_signal_time = None) -> List[str]:
         """Generate all display lines including trading info"""
         try:
             edt_time = datetime.now(ZoneInfo("America/New_York"))
@@ -310,11 +310,15 @@ class DisplayManager:
                  f"BRTI: {brti_status}")
         lines.append(header)
         
-        # Trading statistics line
+        # Trading statistics line with signal info
         if trading_stats:
-            stats_line = (f"📊 Trades Today: {trading_stats.get('total_trades', 0)} | "
-                         f"Success Rate: {trading_stats.get('success_rate', 0):.1f}% | "
-                         f"Volume: ${trading_stats.get('total_volume', 0):,.0f}")
+            signal_indicator = "🔔" if last_signal_time and (datetime.now() - last_signal_time).seconds < 30 else "📊"
+            last_signal_str = last_signal_time.strftime('%H:%M:%S') if last_signal_time else "None"
+            
+            stats_line = (f"{signal_indicator} Trades: {trading_stats.get('total_trades', 0)} | "
+                         f"Success: {trading_stats.get('success_rate', 0):.1f}% | "
+                         f"Volume: ${trading_stats.get('total_volume', 0):,.0f} | "
+                         f"Signals: {signal_count} | Last: {last_signal_str}")
             lines.append(stats_line)
         
         # Market ladder
@@ -400,6 +404,10 @@ class VolatilityAdaptiveTrader:
         self.recent_trades: List[TradeExecutionInfo] = []
         self.last_trading_decision_time = 0
         self.trading_decision_interval = 5.0  # Make decisions every 5 seconds
+        
+        # Signal tracking
+        self.signal_count = 0
+        self.last_signal_time = None
         
         # Statistics
         self.btc_updates = 0
@@ -531,7 +539,7 @@ class VolatilityAdaptiveTrader:
         self.active_markets = target_markets
     
     def _make_trading_decisions(self):
-        """Make trading decisions and execute them"""
+        """Make trading decisions and execute them - WITH SIGNAL NOTIFICATIONS"""
         if not self.last_btc_price or not self.active_markets:
             return
         
@@ -563,8 +571,27 @@ class VolatilityAdaptiveTrader:
             self.last_btc_price, market_data_points, portfolio, self.current_volatility
         )
         
+        # Check for new signals
+        if decisions:
+            self.signal_count += len(decisions)
+            self.last_signal_time = datetime.now()
+            
+            # Console notification
+            print(f"\n🎯 {len(decisions)} new trading signals received at {self.last_signal_time.strftime('%H:%M:%S')}")
+            for decision in decisions:
+                ticker_short = decision.ticker.split('-')[-1] if decision.ticker else "UNKNOWN"
+                print(f"   ⚡ {decision.action} {decision.quantity} {ticker_short} @ ${decision.price:.2f} (Edge: {decision.edge:+.1%})")
+        
         # Check for exit signals
         exit_decisions = self.trading_logic.evaluate_exit_signals(portfolio, market_data_points)
+        if exit_decisions:
+            self.signal_count += len(exit_decisions)
+            
+            print(f"\n🚪 {len(exit_decisions)} exit signals received at {datetime.now().strftime('%H:%M:%S')}")
+            for decision in exit_decisions:
+                ticker_short = decision.ticker.split('-')[-1] if decision.ticker else "UNKNOWN"
+                print(f"   🚪 {decision.action} {decision.quantity} {ticker_short} @ ${decision.price:.2f} (EXIT)")
+        
         all_decisions = decisions + exit_decisions
         
         if all_decisions:
@@ -644,11 +671,12 @@ class VolatilityAdaptiveTrader:
                 portfolio_summary = self.trading_engine.get_portfolio_summary()
                 trading_stats = self.trading_engine.get_status().get('performance', {})
                 
-                # Display
+                # Display (with signal tracking)
                 lines = self.display.format_market_display(
                     self.active_markets, self.last_btc_price, 
                     self.current_volatility, self.brti_manager.is_brti_running(),
-                    portfolio_summary, self.recent_trades, trading_stats
+                    portfolio_summary, self.recent_trades, trading_stats,
+                    self.signal_count, self.last_signal_time
                 )
                 self.display.update_multiline_display(lines)
                 

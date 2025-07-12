@@ -1,4 +1,4 @@
-# trading_logic.py - Central decision making hub
+# trading_logic.py - Central decision making hub with Kalshi contract rules
 from typing import List, Dict, Any, Optional
 import numpy as np
 import time
@@ -33,9 +33,10 @@ class TradingDecision:
     reason: str
     market_info: Dict[str, Any]
     risk_approved: bool = False
+    contract_type: str = "YES"  # "YES" or "NO"
 
 class TradingLogic:
-    """Central decision making engine"""
+    """Central decision making engine with Kalshi contract rules"""
     
     def __init__(self, strategy: Strategy, risk_manager: RiskManager, config: Dict[str, Any]):
         self.strategy = strategy
@@ -55,13 +56,12 @@ class TradingLogic:
     def make_trading_decisions(self, btc_price: float, market_data: List[MarketDataPoint], 
                               portfolio: Portfolio, volatility: float = 0.0) -> List[TradingDecision]:
         """
-        Central decision making method that orchestrates all inputs
+        Central decision making method with Kalshi contract rules enforcement
         
-        Flow:
-        1. Analyze each market for trading opportunities
-        2. Get strategy recommendations
-        3. Apply risk management
-        4. Return final trading decisions
+        Rules:
+        - Can always BUY_YES or BUY_NO
+        - Can only SELL_YES if you own YES contracts for that market
+        - Can only SELL_NO if you own NO contracts for that market
         """
         decisions = []
         
@@ -87,12 +87,20 @@ class TradingLogic:
                 if strategy_signal['action'] == 'NO_TRADE':
                     continue
                 
-                # 3. Apply risk management
-                risk_validated_signal = self._apply_risk_management(
+                # 3. Check Kalshi contract rules BEFORE risk management
+                contract_validated_signal = self._validate_kalshi_contract_rules(
                     strategy_signal, portfolio, market_analysis
                 )
                 
-                # 4. Create trading decision
+                if not contract_validated_signal['valid']:
+                    continue
+                
+                # 4. Apply risk management
+                risk_validated_signal = self._apply_risk_management(
+                    contract_validated_signal, portfolio, market_analysis
+                )
+                
+                # 5. Create trading decision
                 if risk_validated_signal['approved']:
                     decision = TradingDecision(
                         ticker=market_point.ticker,
@@ -104,7 +112,8 @@ class TradingLogic:
                         spread_pct=market_analysis['spread_pct'],
                         reason=risk_validated_signal['reason'],
                         market_info=market_analysis,
-                        risk_approved=True
+                        risk_approved=True,
+                        contract_type=risk_validated_signal['contract_type']
                     )
                     decisions.append(decision)
                 
@@ -113,6 +122,87 @@ class TradingLogic:
                 continue
         
         return decisions
+    
+    def _validate_kalshi_contract_rules(self, strategy_signal: Dict[str, Any], 
+                                       portfolio: Portfolio, market_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate that we can actually execute this trade under Kalshi rules
+        
+        Kalshi Rules:
+        - BUY_YES: Always allowed
+        - BUY_NO: Always allowed  
+        - SELL_YES: Only if you own YES contracts for this market
+        - SELL_NO: Only if you own NO contracts for this market
+        """
+        ticker = market_analysis['ticker']
+        action = strategy_signal['action']
+        
+        # Get current position for this specific market
+        current_position = portfolio.get_position(ticker)
+        
+        # For Kalshi, we need to track YES and NO contracts separately
+        # This is a simplified approach - in reality you'd need separate tracking
+        current_quantity = current_position.quantity if current_position else 0
+        
+        if action in ['BUY_YES', 'BUY_NO']:
+            # Can always buy
+            return {
+                'valid': True,
+                'action': action,
+                'quantity': strategy_signal['quantity'],
+                'price': strategy_signal['price'],
+                'reason': strategy_signal['reason'],
+                'contract_type': 'YES' if action == 'BUY_YES' else 'NO'
+            }
+        
+        elif action == 'SELL_YES':
+            # Can only sell YES if we own YES contracts
+            # For simplification: positive quantity = YES contracts, negative = NO contracts
+            if current_quantity > 0:
+                max_sellable = current_quantity
+                actual_quantity = min(strategy_signal['quantity'], max_sellable)
+                
+                if actual_quantity > 0:
+                    return {
+                        'valid': True,
+                        'action': action,
+                        'quantity': actual_quantity,
+                        'price': strategy_signal['price'],
+                        'reason': f"{strategy_signal['reason']} (limited to {actual_quantity} YES contracts owned)",
+                        'contract_type': 'YES'
+                    }
+            
+            return {
+                'valid': False,
+                'reason': f"Cannot SELL_YES - no YES contracts owned for {ticker}"
+            }
+        
+        elif action == 'SELL_NO':
+            # Can only sell NO if we own NO contracts  
+            # For simplification: negative quantity = NO contracts
+            if current_quantity < 0:
+                max_sellable = abs(current_quantity)
+                actual_quantity = min(strategy_signal['quantity'], max_sellable)
+                
+                if actual_quantity > 0:
+                    return {
+                        'valid': True,
+                        'action': action,
+                        'quantity': actual_quantity,
+                        'price': strategy_signal['price'],
+                        'reason': f"{strategy_signal['reason']} (limited to {actual_quantity} NO contracts owned)",
+                        'contract_type': 'NO'
+                    }
+            
+            return {
+                'valid': False,
+                'reason': f"Cannot SELL_NO - no NO contracts owned for {ticker}"
+            }
+        
+        return {
+            'valid': False,
+            'reason': f"Unknown action: {action}"
+        }
     
     def _analyze_market_opportunity(self, market_data: MarketDataPoint, 
                                    btc_price: float, volatility: float) -> Optional[Dict[str, Any]]:
@@ -131,7 +221,7 @@ class TradingLogic:
             'timestamp': time.time()
         }
         
-        # Calculate spread
+        # Calculate spread (prices in cents)
         if market_data.yes_bid and market_data.yes_ask:
             analysis['spread'] = market_data.yes_ask - market_data.yes_bid
             analysis['spread_pct'] = (analysis['spread'] / market_data.yes_ask) * 100
@@ -143,7 +233,7 @@ class TradingLogic:
         if analysis['spread_pct'] > self.max_spread_threshold:
             return None
         
-        # Calculate implied probability
+        # Calculate implied probability (convert from cents to probability)
         analysis['implied_prob'] = self._calculate_implied_probability(
             market_data, btc_price
         )
@@ -182,13 +272,13 @@ class TradingLogic:
         return True
     
     def _calculate_implied_probability(self, market_data: MarketDataPoint, btc_price: float) -> float:
-        """Calculate market's implied probability"""
+        """Calculate market's implied probability from cents prices"""
         if btc_price > market_data.strike:
-            # BTC is above strike, use YES ask price
-            return market_data.yes_ask / 100 if market_data.yes_ask else 0.0
+            # BTC is above strike, market thinks YES is likely, use YES ask
+            return market_data.yes_ask / 100.0 if market_data.yes_ask else 0.0
         else:
-            # BTC is below strike, use YES bid price
-            return market_data.yes_bid / 100 if market_data.yes_bid else 0.0
+            # BTC is below strike, market thinks NO is likely, use YES bid  
+            return market_data.yes_bid / 100.0 if market_data.yes_bid else 0.0
     
     def _calculate_theoretical_probability(self, strike: float, current_price: float, 
                                          volatility: float, time_hours: float = 1.0) -> float:
@@ -213,13 +303,13 @@ class TradingLogic:
                            market_analysis: Dict[str, Any], portfolio: Portfolio) -> Dict[str, Any]:
         """Get trading signal from strategy"""
         
-        # Convert to strategy-compatible format
+        # Convert to strategy-compatible format (convert cents to dollars for strategy)
         from strategy import MarketData as StrategyMarketData
         strategy_data = StrategyMarketData(
             ticker=market_data.ticker,
-            price=market_analysis['mid_price'],
-            bid=market_data.yes_bid or 0,
-            ask=market_data.yes_ask or 0,
+            price=market_analysis['mid_price'] / 100.0,  # Convert cents to dollars
+            bid=(market_data.yes_bid or 0) / 100.0,
+            ask=(market_data.yes_ask or 0) / 100.0,
             volume=market_data.volume_delta or 0,
             timestamp=market_data.timestamp or time.time()
         )
@@ -244,7 +334,7 @@ class TradingLogic:
             'action': action,
             'confidence': confidence,
             'quantity': signal.quantity,
-            'price': signal.price,
+            'price': signal.price * 100.0,  # Convert back to cents for Kalshi
             'reason': signal.reason
         }
     
@@ -260,16 +350,16 @@ class TradingLogic:
         # If strategy suggests buying and we have positive edge
         if strategy_signal.side == 'buy' and edge > self.min_edge_threshold:
             if btc_price > strike:
-                return 'BUY_YES'  # BTC above strike, buy YES
+                return 'BUY_YES'  # BTC above strike, buy YES (likely to stay above)
             else:
-                return 'BUY_NO'   # BTC below strike, buy NO
+                return 'BUY_NO'   # BTC below strike, buy NO (likely to stay below)
         
-        # If strategy suggests selling and we have negative edge (overvalued)
+        # If strategy suggests selling and we have negative edge (market overvalued)
         elif strategy_signal.side == 'sell' and edge < -self.min_edge_threshold:
             if btc_price > strike:
-                return 'SELL_NO'  # BTC above strike, sell NO
+                return 'SELL_NO'  # BTC above strike, sell NO (overvalued)
             else:
-                return 'SELL_YES' # BTC below strike, sell YES
+                return 'SELL_YES' # BTC below strike, sell YES (overvalued)
         
         return 'NO_TRADE'
     
@@ -282,7 +372,7 @@ class TradingLogic:
             market_ticker=market_analysis['ticker'],
             side='buy' if 'BUY' in strategy_signal['action'] else 'sell',
             quantity=strategy_signal['quantity'],
-            price=strategy_signal['price'],
+            price=strategy_signal['price'] / 100.0,  # Convert to dollars for risk manager
             reason=strategy_signal['reason']
         )
         
@@ -299,7 +389,7 @@ class TradingLogic:
         validated_signal = validated_signals[0]
         
         # Position sizing based on confidence and edge
-        confidence = strategy_signal['confidence']
+        confidence = strategy_signal.get('confidence', 0.5)
         edge_magnitude = abs(market_analysis['edge'])
         
         # Scale position size based on confidence and edge
@@ -311,12 +401,19 @@ class TradingLogic:
             'approved': True,
             'action': strategy_signal['action'],
             'quantity': adjusted_quantity,
-            'price': validated_signal.price,
-            'reason': f"{validated_signal.reason} (confidence: {confidence:.2f})"
+            'price': strategy_signal['price'],  # Keep in cents
+            'reason': f"{validated_signal.reason} (confidence: {confidence:.2f})",
+            'contract_type': strategy_signal.get('contract_type', 'YES')
         }
     
     def evaluate_exit_signals(self, portfolio: Portfolio, current_market_data: List[MarketDataPoint]) -> List[TradingDecision]:
-        """Evaluate existing positions for exit signals"""
+        """
+        Evaluate existing positions for exit signals with Kalshi contract rules
+        
+        Can only exit positions you actually own:
+        - If you own YES contracts (positive quantity), can SELL_YES
+        - If you own NO contracts (negative quantity), can SELL_NO
+        """
         exit_decisions = []
         
         # Create a lookup for current market data
@@ -330,49 +427,54 @@ class TradingLogic:
             if not current_data:
                 continue
             
-            # Calculate current P&L
-            if position.quantity > 0:  # Long position
-                current_price = current_data.yes_bid or position.avg_price
-            else:  # Short position
-                current_price = current_data.yes_ask or position.avg_price
+            # Determine what type of contracts we own and current price
+            if position.quantity > 0:  # Own YES contracts
+                # Use YES bid (what we can sell for)
+                current_price = (current_data.yes_bid or position.avg_price * 100) / 100.0
+                contract_type = "YES"
+                exit_action = "SELL_YES"
+            else:  # Own NO contracts (negative quantity)
+                # Use NO bid (100 - YES ask)
+                no_bid = (100 - (current_data.yes_ask or (100 - position.avg_price * 100))) / 100.0
+                current_price = no_bid
+                contract_type = "NO" 
+                exit_action = "SELL_NO"
             
+            # Calculate P&L
             pnl_pct = ((current_price - position.avg_price) / position.avg_price) * 100
             
             # Check exit conditions
-            exit_action = None
             exit_reason = None
             
             # Profit taking
             profit_target = self.config.get('profit_take_pct', 20.0)
             if pnl_pct >= profit_target:
-                exit_action = 'SELL_YES' if position.quantity > 0 else 'BUY_YES'
                 exit_reason = f"Profit taking at {pnl_pct:.1f}%"
             
             # Stop loss
             stop_loss = self.config.get('stop_loss_pct', -10.0)
             if pnl_pct <= stop_loss:
-                exit_action = 'SELL_YES' if position.quantity > 0 else 'BUY_YES'
                 exit_reason = f"Stop loss at {pnl_pct:.1f}%"
             
-            # Time-based exit (if position held too long)
+            # Time-based exit
             max_hold_hours = self.config.get('max_hold_hours', 24)
             position_age_hours = (time.time() - position.timestamp.timestamp()) / 3600
             if position_age_hours >= max_hold_hours:
-                exit_action = 'SELL_YES' if position.quantity > 0 else 'BUY_YES'
                 exit_reason = f"Time-based exit after {position_age_hours:.1f}h"
             
-            if exit_action:
+            if exit_reason:
                 exit_decision = TradingDecision(
                     ticker=ticker,
                     action=exit_action,
                     quantity=abs(position.quantity),
-                    price=current_price,
+                    price=current_price * 100,  # Convert back to cents
                     confidence=1.0,  # High confidence for exits
                     edge=0.0,  # Not applicable for exits
                     spread_pct=0.0,  # Not applicable for exits
                     reason=exit_reason,
                     market_info={'type': 'exit', 'pnl_pct': pnl_pct},
-                    risk_approved=True  # Exits are generally approved
+                    risk_approved=True,  # Exits are generally approved
+                    contract_type=contract_type
                 )
                 exit_decisions.append(exit_decision)
         

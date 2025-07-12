@@ -1,4 +1,4 @@
-# trading_engine.py - Fixed price conversion for Kalshi
+# trading_engine.py - Orchestrates trade execution and portfolio management
 import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
@@ -23,7 +23,13 @@ logger = logging.getLogger(__name__)
 
 class TradingEngine:
     """
-    Trading engine with proper Kalshi price conversion
+    Trading engine that receives decisions from trading_logic.py and executes them
+    
+    This class orchestrates:
+    1. Receiving trading decisions from trading_logic.py
+    2. Converting decisions to orders via order_manager.py
+    3. Updating portfolio state
+    4. Providing status and performance tracking
     """
     
     def __init__(self, mode: str = 'simulation', kalshi_client=None, config: Dict = None):
@@ -86,7 +92,13 @@ class TradingEngine:
     
     def process_trading_decisions(self, trading_decisions: List) -> List[Dict[str, Any]]:
         """
-        Main entry point with PROPER KALSHI PRICE CONVERSION
+        Main entry point - receives trading decisions from trading_logic.py
+        
+        Args:
+            trading_decisions: List of TradingDecision objects from trading_logic.py
+        
+        Returns:
+            List of execution results
         """
         if not self.is_running:
             return [{'status': 'engine_stopped', 'executed': False}]
@@ -102,8 +114,8 @@ class TradingEngine:
             # Update pending orders and process fills
             self._update_pending_orders_and_fills()
             
-            # Convert trading decisions to order signals with PROPER PRICE CONVERSION
-            order_signals = self._convert_decisions_to_orders_fixed(trading_decisions)
+            # Convert trading decisions to order signals
+            order_signals = self._convert_decisions_to_orders(trading_decisions)
             
             if order_signals:
                 # Execute orders through order manager
@@ -126,72 +138,38 @@ class TradingEngine:
             logger.error(f"Error processing trading decisions: {e}")
             return [{'status': 'error', 'message': str(e), 'executed': False}]
     
-    def _convert_decisions_to_orders_fixed(self, trading_decisions: List) -> List[OrderSignal]:
-        """Convert TradingDecision objects to OrderSignal objects with FIXED PRICE CONVERSION"""
+    def _convert_decisions_to_orders(self, trading_decisions: List) -> List[OrderSignal]:
+        """Convert TradingDecision objects to OrderSignal objects"""
         order_signals = []
         
         for decision in trading_decisions:
             action = getattr(decision, 'action', '')
-            ticker = getattr(decision, 'ticker', '')
-            
-            # Check if we can actually make this trade
-            current_position = self.portfolio.get_position(ticker)
-            current_quantity = current_position.quantity if current_position else 0
-            
-            # Get raw price from decision (this is in cents 0-100)
-            raw_price = getattr(decision, 'price', 0.0)
-            
-            # CRITICAL FIX: Convert Kalshi cents to dollars
-            if raw_price > 1.0:
-                # Price is in cents, convert to dollars
-                dollar_price = raw_price / 100.0
-            else:
-                # Price already in dollars
-                dollar_price = raw_price
-            
-            # Ensure price stays in valid range
-            dollar_price = max(0.01, min(0.99, dollar_price))
             
             if action in ['BUY_YES', 'BUY_NO']:
                 side = 'buy'
-                contract_type = 'YES' if action == 'BUY_YES' else 'NO'
+                # For Kalshi, we need to determine the actual price based on YES/NO
+                if action == 'BUY_YES':
+                    price = getattr(decision, 'price', 0.0)
+                else:  # BUY_NO
+                    price = 100 - getattr(decision, 'price', 0.0)  # NO price is inverse of YES price
             
             elif action in ['SELL_YES', 'SELL_NO']:
-                # Can only sell if we own the contracts
-                if action == 'SELL_YES' and current_quantity <= 0:
-                    continue  # Skip - can't sell YES without owning YES
-                elif action == 'SELL_NO' and current_quantity >= 0:
-                    continue  # Skip - can't sell NO without owning NO
-                
                 side = 'sell'
-                contract_type = 'YES' if action == 'SELL_YES' else 'NO'
-                
-                # Limit sell quantity to what we actually own
-                requested_quantity = getattr(decision, 'quantity', 0)
                 if action == 'SELL_YES':
-                    actual_quantity = min(requested_quantity, current_quantity)
+                    price = getattr(decision, 'price', 0.0)
                 else:  # SELL_NO
-                    actual_quantity = min(requested_quantity, abs(current_quantity))
-                
-                if actual_quantity <= 0:
-                    continue
+                    price = 100 - getattr(decision, 'price', 0.0)
+            
             else:
                 continue  # Skip HOLD, NO_TRADE, etc.
             
-            # Adjust quantity for sells
-            if action in ['SELL_YES', 'SELL_NO']:
-                quantity = actual_quantity
-            else:
-                quantity = getattr(decision, 'quantity', 0)
-            
             order_signal = OrderSignal(
-                market_ticker=ticker,
+                market_ticker=getattr(decision, 'ticker', ''),
                 side=side,
-                quantity=quantity,
-                price=dollar_price,  # NOW IN DOLLARS
+                quantity=getattr(decision, 'quantity', 0),
+                price=price / 100 if price > 1 else price,  # Convert to 0-1 range for Kalshi if needed
                 order_type='limit',
-                reason=f"{action}: {getattr(decision, 'reason', '')}",
-                contract_type=contract_type
+                reason=f"{action}: {getattr(decision, 'reason', '')}"
             )
             order_signals.append(order_signal)
         
@@ -208,13 +186,12 @@ class TradingEngine:
         
         for fill in new_fills:
             if fill.filled_quantity > 0:
-                # Update portfolio with the fill (prices already in dollars)
+                # Update portfolio with the fill
                 self.portfolio.add_trade(
                     fill.market_ticker,
                     fill.filled_quantity,
-                    fill.filled_price,  # Already in dollars from order manager
-                    fill.side,
-                    getattr(fill, 'contract_type', 'YES')
+                    fill.filled_price,
+                    fill.side
                 )
                 
                 self.trade_count += 1
@@ -224,7 +201,7 @@ class TradingEngine:
                 # Mark as processed
                 fill._processed = True
                 
-                logger.info(f"Fill processed: {fill.side} {fill.filled_quantity} {getattr(fill, 'contract_type', 'YES')} {fill.market_ticker} @ ${fill.filled_price:.3f}")
+                logger.info(f"Fill processed: {fill.side} {fill.filled_quantity} {fill.market_ticker} @ {fill.filled_price:.3f}")
     
     def _process_order_result(self, decision, order_result: OrderResult) -> Dict[str, Any]:
         """Process the result of an order execution"""
@@ -255,17 +232,8 @@ class TradingEngine:
         return result
     
     def update_market_prices(self, price_data: Dict[str, float]):
-        """Update portfolio with current market prices (prices should be in dollars)"""
-        # Ensure prices are in dollar format
-        converted_prices = {}
-        for ticker, price in price_data.items():
-            if price > 1.0:
-                # Price seems to be in cents, convert to dollars
-                converted_prices[ticker] = price / 100.0
-            else:
-                converted_prices[ticker] = price
-        
-        self.portfolio.update_market_prices(converted_prices)
+        """Update portfolio with current market prices"""
+        self.portfolio.update_market_prices(price_data)
         
         # Update total P&L
         self.session_stats['total_pnl'] = self.portfolio.get_portfolio_value() - self.portfolio.initial_cash
@@ -302,10 +270,6 @@ class TradingEngine:
         """Force a trade (for manual intervention)"""
         if not self.is_running:
             return {'status': 'error', 'message': 'Engine not running'}
-        
-        # Ensure price is in dollars
-        if price > 1.0:
-            price = price / 100.0
         
         order = OrderSignal(
             market_ticker=market_ticker,

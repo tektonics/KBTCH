@@ -63,8 +63,9 @@ class SimulatedOrderExecutor(OrderExecutor):
         if self.latency_simulation:
             time.sleep(random.uniform(0.01, 0.05))
         
-        # Determine contract type and price from order reason
-        contract_type, kalshi_price = self._determine_kalshi_order_details(order)
+        # Get contract type and validate price
+        contract_type = getattr(order, 'contract_type', 'YES')
+        kalshi_price = self._validate_and_convert_price(order.price)
         
         # Determine if order fills
         fill_random = random.random()
@@ -95,12 +96,12 @@ class SimulatedOrderExecutor(OrderExecutor):
                 filled_quantity = order.quantity
                 status = 'filled'
             
-            # Apply realistic price slippage for Kalshi
+            # Apply realistic price slippage for Kalshi (in dollar terms)
             slippage_direction = 1 if order.side == 'buy' else -1
             slippage_factor = 1 + (slippage_direction * self.price_slippage * random.random())
             filled_price = kalshi_price * slippage_factor
             
-            # Ensure price stays within Kalshi bounds (0-1)
+            # Ensure price stays within Kalshi bounds (0.01-0.99 dollars)
             filled_price = max(0.01, min(0.99, filled_price))
             
             result = OrderResult(
@@ -117,17 +118,17 @@ class SimulatedOrderExecutor(OrderExecutor):
             )
         
         self.orders[order_id] = result
+        logger.info(f"Simulated order: {order.side} {order.quantity} {contract_type} {order.market_ticker} @ ${kalshi_price:.2f} -> {result.status}")
         return result
     
-    def _determine_kalshi_order_details(self, order: OrderSignal) -> tuple:
-        """Determine Kalshi contract type and price from order details"""
-        if 'YES' in order.reason:
-            return 'YES', order.price
-        elif 'NO' in order.reason:
-            return 'NO', order.price
-        else:
-            # Default to YES contract
-            return 'YES', order.price
+    def _validate_and_convert_price(self, price: float) -> float:
+        """Validate and ensure price is in correct dollar format (0.01-0.99)"""
+        # If price is in cents (> 1), convert to dollars
+        if price > 1.0:
+            price = price / 100.0
+        
+        # Ensure within valid Kalshi range
+        return max(0.01, min(0.99, price))
     
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a simulated order"""
@@ -135,6 +136,7 @@ class SimulatedOrderExecutor(OrderExecutor):
             order = self.orders[order_id]
             if order.status in ['pending', 'partial']:
                 order.status = 'cancelled'
+                logger.info(f"Cancelled simulated order {order_id}")
                 return True
         return False
     
@@ -159,17 +161,17 @@ class KalshiOrderExecutor(OrderExecutor):
                 # Rate limiting
                 time.sleep(self.rate_limit_delay)
                 
-                # Determine contract type and prepare order
-                contract_type, kalshi_order = self._prepare_kalshi_order(order)
+                # Prepare Kalshi order
+                kalshi_order = self._prepare_kalshi_order(order)
                 
                 # Execute order via API
                 response = self._execute_kalshi_api_call(kalshi_order)
                 
                 if response.get('status') == 'success':
                     order_data = response.get('order', {})
-                    result = self._process_successful_order(order, order_data, contract_type)
+                    result = self._process_successful_order(order, order_data)
                 else:
-                    result = self._process_failed_order(order, response, contract_type)
+                    result = self._process_failed_order(order, response)
                 
                 if result.order_id:
                     self.orders[result.order_id] = result
@@ -185,15 +187,13 @@ class KalshiOrderExecutor(OrderExecutor):
         
         return self._create_error_result(order, "Max retries exceeded")
     
-    def _prepare_kalshi_order(self, order: OrderSignal) -> tuple:
+    def _prepare_kalshi_order(self, order: OrderSignal) -> Dict:
         """Prepare Kalshi-specific order format"""
-        # Determine if this is a YES or NO contract order
-        contract_type = 'YES'  # Default
-        if 'NO' in order.reason.upper():
-            contract_type = 'NO'
+        contract_type = getattr(order, 'contract_type', 'YES')
         
-        # Convert price to Kalshi cents format (0-100)
-        kalshi_price = int(order.price * 100)
+        # Convert price to Kalshi cents format (1-99)
+        dollar_price = self._validate_dollar_price(order.price)
+        kalshi_price_cents = int(dollar_price * 100)
         
         kalshi_order = {
             'ticker': order.market_ticker,
@@ -204,24 +204,37 @@ class KalshiOrderExecutor(OrderExecutor):
             'type': 'limit',
         }
         
-        # Set price based on contract type
+        # Set price based on contract type and side
         if contract_type == 'YES':
             if order.side == 'buy':
-                kalshi_order['yes_price'] = kalshi_price
-            else:
-                kalshi_order['yes_price'] = kalshi_price
+                kalshi_order['yes_price'] = kalshi_price_cents
+            else:  # sell
+                kalshi_order['yes_price'] = kalshi_price_cents
         else:  # NO contract
             if order.side == 'buy':
-                kalshi_order['no_price'] = kalshi_price
-            else:
-                kalshi_order['no_price'] = kalshi_price
+                # For NO contracts, price is inverse
+                kalshi_order['no_price'] = kalshi_price_cents
+            else:  # sell
+                kalshi_order['no_price'] = kalshi_price_cents
         
-        return contract_type, kalshi_order
+        logger.info(f"Prepared Kalshi order: {kalshi_order}")
+        return kalshi_order
+    
+    def _validate_dollar_price(self, price: float) -> float:
+        """Ensure price is in valid dollar format"""
+        # If price seems to be in cents, convert to dollars
+        if price > 1.0:
+            price = price / 100.0
+        
+        # Ensure within Kalshi bounds
+        return max(0.01, min(0.99, price))
     
     def _execute_kalshi_api_call(self, kalshi_order: Dict) -> Dict:
         """Execute the actual Kalshi API call"""
         # This would be the actual Kalshi API call
         # For now, return a mock response structure
+        logger.info(f"Executing Kalshi API call: {kalshi_order}")
+        
         return {
             'status': 'success',
             'order': {
@@ -233,8 +246,10 @@ class KalshiOrderExecutor(OrderExecutor):
             }
         }
     
-    def _process_successful_order(self, order: OrderSignal, order_data: Dict, contract_type: str) -> OrderResult:
+    def _process_successful_order(self, order: OrderSignal, order_data: Dict) -> OrderResult:
         """Process successful order response"""
+        contract_type = getattr(order, 'contract_type', 'YES')
+        
         return OrderResult(
             order_id=order_data.get('order_id'),
             market_ticker=order.market_ticker,
@@ -248,8 +263,10 @@ class KalshiOrderExecutor(OrderExecutor):
             contract_type=contract_type
         )
     
-    def _process_failed_order(self, order: OrderSignal, response: Dict, contract_type: str) -> OrderResult:
+    def _process_failed_order(self, order: OrderSignal, response: Dict) -> OrderResult:
         """Process failed order response"""
+        contract_type = getattr(order, 'contract_type', 'YES')
+        
         return OrderResult(
             order_id='',
             market_ticker=order.market_ticker,
@@ -266,6 +283,8 @@ class KalshiOrderExecutor(OrderExecutor):
     
     def _create_error_result(self, order: OrderSignal, error_message: str) -> OrderResult:
         """Create error result for failed orders"""
+        contract_type = getattr(order, 'contract_type', 'YES')
+        
         return OrderResult(
             order_id='',
             market_ticker=order.market_ticker,
@@ -277,7 +296,7 @@ class KalshiOrderExecutor(OrderExecutor):
             status='rejected',
             timestamp=datetime.now(),
             error_message=error_message,
-            contract_type='YES'
+            contract_type=contract_type
         )
     
     def cancel_order(self, order_id: str) -> bool:
@@ -291,6 +310,7 @@ class KalshiOrderExecutor(OrderExecutor):
             # For now, simulate cancellation
             if order_id in self.orders:
                 self.orders[order_id].status = 'cancelled'
+                logger.info(f"Cancelled Kalshi order {order_id}")
                 return True
             return False
             
@@ -336,7 +356,9 @@ class OrderManager:
             'rejected_orders': 0,
             'cancelled_orders': 0,
             'total_fills': 0,
-            'total_volume': 0.0
+            'total_volume': 0.0,
+            'yes_contracts_traded': 0,
+            'no_contracts_traded': 0
         }
     
     def execute_orders(self, orders: List[OrderSignal]) -> List[OrderResult]:
@@ -344,7 +366,8 @@ class OrderManager:
         results = []
         
         for order in orders:
-            logger.info(f"Executing {order.side.upper()} {order.quantity} {order.market_ticker} @ {order.price:.3f} - {order.reason}")
+            contract_type = getattr(order, 'contract_type', 'YES')
+            logger.info(f"Executing {order.side.upper()} {order.quantity} {contract_type} {order.market_ticker} @ ${order.price:.3f} - {order.reason}")
             
             result = self.executor.execute_order(order)
             results.append(result)
@@ -355,6 +378,12 @@ class OrderManager:
                 self.order_stats['rejected_orders'] += 1
             else:
                 self.order_stats['successful_orders'] += 1
+                
+                # Track contract types
+                if result.contract_type == 'YES':
+                    self.order_stats['yes_contracts_traded'] += result.quantity
+                else:
+                    self.order_stats['no_contracts_traded'] += result.quantity
             
             # Manage order state
             if result.status in ['pending', 'partial']:
@@ -460,5 +489,7 @@ class OrderManager:
             'yes_contracts': len([o for o in filled_orders if o.contract_type == 'YES']),
             'no_contracts': len([o for o in filled_orders if o.contract_type == 'NO']),
             'buy_orders': len([o for o in filled_orders if o.side == 'buy']),
-            'sell_orders': len([o for o in filled_orders if o.side == 'sell'])
+            'sell_orders': len([o for o in filled_orders if o.side == 'sell']),
+            'yes_volume': self.order_stats['yes_contracts_traded'],
+            'no_volume': self.order_stats['no_contracts_traded']
         }
