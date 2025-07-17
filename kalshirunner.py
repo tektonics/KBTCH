@@ -11,9 +11,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from kalshi_bot.kalshi_client import KalshiClient
+from portfolio import Portfolio
 from trading_engine import TradingEngine
 from trading_logic import TradingLogic, MarketDataPoint, TradingDecision
-from portfolio import Portfolio
 from risk_manager import RiskManager
 from strategy import StrategyFactory
 from config import TRADING_CONFIG
@@ -30,7 +30,6 @@ class MarketInfo:
 
 @dataclass
 class TradingParams:
-    """Simplified trading parameters"""
     base_market_count: int = 3
     volatility_threshold_low: float = 0.5
     volatility_threshold_high: float = 1.0
@@ -38,7 +37,6 @@ class TradingParams:
 
 @dataclass
 class TradeExecutionInfo:
-    """Information about executed trades"""
     ticker: str
     action: str
     quantity: int
@@ -48,7 +46,6 @@ class TradeExecutionInfo:
     reason: str
 
 class BTCPriceMonitor:
-    """Optimized BTC price monitoring with caching"""
     def __init__(self, price_file: str = "aggregate_price.json"):
         self.price_file = Path(price_file)
         self.last_price = None
@@ -111,7 +108,7 @@ class BTCPriceMonitor:
             return 0.0
         
         std_dev = np.std(returns, ddof=1) if len(returns) > 1 else 0.0
-        return std_dev * np.sqrt(525600)  # Annualize
+        return std_dev * np.sqrt(525600)
 
 class BRTIManager:
     """Lightweight BRTI process manager"""
@@ -145,8 +142,7 @@ class BRTIManager:
                 text=True
             )
             
-            # Wait for initialization
-            for _ in range(30):  # 30 second timeout
+            for _ in range(30):
                 if self.price_file.exists():
                     try:
                         with open(self.price_file, 'r') as f:
@@ -179,7 +175,6 @@ class BRTIManager:
             self.process = None
 
 class MarketSelector:
-    """Simple market selection logic"""
     def __init__(self, params: TradingParams):
         self.params = params
     
@@ -238,7 +233,6 @@ class MarketSelector:
         primary_ticker = selected[0]['ticker'] if selected else None
         selected.sort(key=lambda x: x['strike'])
         
-        # Convert to MarketInfo objects
         return [
             MarketInfo(
                 ticker=m['ticker'],
@@ -250,10 +244,9 @@ class MarketSelector:
         ]
 
 class DisplayManager:
-    """Handles all display operations"""
     def __init__(self):
         self.display_line_count = 0
-    
+
     def clear_display(self):
         if self.display_line_count > 0:
             for i in range(self.display_line_count):
@@ -268,12 +261,12 @@ class DisplayManager:
         
         for i, line in enumerate(lines):
             if i > 0:
-                sys.stdout.write('\n')
+               sys.stdout.write('\n')
             sys.stdout.write(line)
         
         sys.stdout.flush()
         self.display_line_count = len(lines)
-    
+        
     def print_new_line(self, line: str):
         self.clear_display()
         print(line)
@@ -283,7 +276,6 @@ class DisplayManager:
                             volatility: float, brti_running: bool,
                             portfolio_summary: Dict, recent_trades: List[TradeExecutionInfo],
                             trading_stats: Dict) -> List[str]:
-        """Generate all display lines including trading info"""
         try:
             edt_time = datetime.now(ZoneInfo("America/New_York"))
         except ImportError:
@@ -300,7 +292,6 @@ class DisplayManager:
         
         header = (f"{edt_time.strftime('%H:%M:%S')} | "
                  f"BTC: ${btc_price:,.2f} | "
-                 f"Vol: {volatility:.1%} {vol_indicator} | "
                  f"Portfolio: ${portfolio_value:,.2f} | "
                  f"P&L: ${unrealized_pnl:+,.2f} {pnl_color} | "
                  f"BRTI: {brti_status}")
@@ -309,8 +300,7 @@ class DisplayManager:
         # Trading statistics line
         if trading_stats:
             stats_line = (f"📊 Trades Today: {trading_stats.get('total_trades', 0)} | "
-                         f"Success Rate: {trading_stats.get('success_rate', 0):.1f}% | "
-                         f"Volume: ${trading_stats.get('total_volume', 0):,.0f}")
+                         f"Success Rate: {trading_stats.get('success_rate', 0):.1f}% | ")
             lines.append(stats_line)
         
         # Market ladder
@@ -347,7 +337,7 @@ class DisplayManager:
                 status_emoji = "✅" if trade.status in ['filled', 'pending'] else "❌"
                 time_str = trade.timestamp.strftime('%H:%M:%S')
                 lines.append(f"   {time_str} {status_emoji} {trade.action} {trade.quantity} {trade.ticker} @ ${trade.price:.2f}")
-        
+
         return lines
     
     def _format_market_line(self, market: MarketInfo) -> str:
@@ -397,12 +387,11 @@ class VolatilityAdaptiveTrader:
         self.last_trading_decision_time = 0
         self.trading_decision_interval = 5.0  # Make decisions every 5 seconds
         
-        # Statistics
         self.btc_updates = 0
         self.market_updates = 0
         self.volatility_updates = 0
         self.last_market_update_time = None
-        
+
         self._setup_signal_handlers()
         self._silence_client_output()
     
@@ -667,8 +656,6 @@ class VolatilityAdaptiveTrader:
             pass
 
 async def main():
-    """Entry point with dependency checking"""
-    # Check dependencies
     missing_deps = []
     dependencies = ['ccxt', 'numpy', 'kalshi_bot.kalshi_client', 'trading_engine', 'trading_logic', 'portfolio']
     
@@ -696,12 +683,6 @@ async def main():
         await trader.run_trading_loop()
     except Exception as e:
         print(f"\n💥 Fatal error: {e}")
-    finally:
-        try:
-            if hasattr(trader, 'brti_manager'):
-                trader.brti_manager.stop_brti()
-        except:
-            pass
 
 if __name__ == "__main__":
     try:
