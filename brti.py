@@ -2,7 +2,6 @@ import ccxt
 import time
 import json
 import numpy as np
-import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -443,19 +442,13 @@ class OptimizedBRTI:
         return [(price, volume) for price, volume in price_volumes.items()]
     
     def calculate_curves(self, bids: List[Tuple[float, float]], asks: List[Tuple[float, float]]) -> Dict[str, List[Tuple[float, float]]]:
-        """Calculate bid, ask, mid, and mid spread-volume curves"""
+        """Calculate bid, ask, mid, and mid spread-volume curves according to CF Benchmarks methodology"""
         curves = {
-            'bid_curve': [],
-            'ask_curve': [],
-            'mid_curve': [],
-            'mid_spread_volume_curve': []
+            'bid_curve': [],        # bidPV_T(v) 
+            'ask_curve': [],        # askPV_T(v)
+            'mid_curve': [],        # midPV_T(v)
+            'mid_spread_volume_curve': []  # midSV_T(v)
         }
-        
-        # Calculate cumulative volumes
-        bid_cumulative = 0
-        ask_cumulative = 0
-        
-        max_depth = min(len(bids), len(asks))
         
         # Build cumulative bid and ask curves
         bid_cum = []
@@ -475,36 +468,47 @@ class OptimizedBRTI:
         max_volume = min(cum_bid_vol, cum_ask_vol)
         volume_steps = np.arange(self.config.spacing_parameter, max_volume, self.config.spacing_parameter)
 
-        # Interpolate prices at each volume step
-        for v in volume_steps:
-            bid_price = next((p for cv, p in bid_cum if cv >= v), None)
-            ask_price = next((p for cv, p in ask_cum if cv >= v), None)
+        # Interpolate prices at each volume step and populate all curves
+        for v_step in volume_steps:
+            bid_price = next((p for cv, p in bid_cum if cv >= v_step), None)
+            ask_price = next((p for cv, p in ask_cum if cv >= v_step), None)
 
             if bid_price is None or ask_price is None:
                 continue
 
             mid_price = (bid_price + ask_price) / 2
-            curves['mid_curve'].append((mid_price, self.config.spacing_parameter))  # Use s as the volume at each step
+            
+            # Populate all curve types as per CF Benchmarks methodology
+            curves['bid_curve'].append((v_step, bid_price))      # bidPV_T(v) [Eq. 1b, 1d]
+            curves['ask_curve'].append((v_step, ask_price))      # askPV_T(v) [Eq. 1a, 1c]
+            curves['mid_curve'].append((v_step, mid_price))      # midPV_T(v) [Eq. 1e]
+            
+            # Calculate mid spread-volume curve: midSV_T(v) = askPV_T(v) / midPV_T(v) - 1 [Eq. 1f]
+            if mid_price > 0:
+                mid_spread_pct = (ask_price / mid_price) - 1
+                curves['mid_spread_volume_curve'].append((v_step, mid_spread_pct))
 
         return curves
-
     
     def calculate_utilized_depth(self, curves: Dict[str, List[Tuple[float, float]]]) -> float:
-        """Calculate utilized depth based on spread-volume curve with spacing parameter"""
+        """Calculate utilized depth based on spread-volume curve with spacing parameter
+        
+        Implements: v_T = max(v_i where midSV_T(v_i) <= D AND midSV_T(v_i+1) > D, s)
+        where D is the maximum spread deviation percentage
+        """
         if not curves['mid_spread_volume_curve']:
             return self.config.spacing_parameter  # Return spacing parameter as minimum
         
-        # Find maximum cumulative volume where spread doesn't exceed threshold
-        utilized_volume = 0.0
+        # Find maximum volume where spread doesn't exceed threshold
+        utilized_volume = self.config.spacing_parameter  # Initialize with spacing parameter
         
-        for i, (mid_price, spread_pct) in enumerate(curves['mid_spread_volume_curve']):
+        for v_step, spread_pct in curves['mid_spread_volume_curve']:
             if spread_pct <= self.config.max_spread_volume_deviation_pct:
-                utilized_volume += 1.0  # Increment depth counter
+                utilized_volume = v_step  # Update to current volume step
             else:
-                break
+                break  # Stop at first violation
         
-        # Apply spacing parameter constraint
-        # If calculated utilized depth < spacing parameter, use spacing parameter
+        # Ensure utilized depth is at least the spacing parameter
         final_utilized_depth = max(utilized_volume, self.config.spacing_parameter)
         
         logger.debug(f"Utilized depth: calculated={utilized_volume}, "
@@ -514,31 +518,42 @@ class OptimizedBRTI:
         return final_utilized_depth
     
     def apply_exponential_weighting(self, curves: Dict[str, List[Tuple[float, float]]], utilized_depth: float) -> float:
-        """Apply exponential weighting to calculate final BRTI value"""
+        """Apply exponential weighting to calculate final BRTI value [137, 138, 143, Eq. 3]"""
         if not curves['mid_curve'] or utilized_depth == 0:
             return 0.0
-        
+
         weighted_sum = 0.0
-        weight_sum = 0.0
+        normalization_factor_sum = 0.0  # This corresponds to NF from methodology
         
-        cumulative_volume = 0.0
-        total_volume = sum([v for _, v in curves['mid_curve'][:int(utilized_depth)]])
-        if total_volume == 0:
+        lambda_param = self.config.lambda_param
+        spacing_s = self.config.spacing_parameter  # This is 's'
+
+        # Filter the mid_curve to only include data up to the utilized_depth
+        # curves['mid_curve'] is expected to be [(volume_step, mid_price), ...]
+        relevant_mid_curve_entries = [
+            (v_step, mid_price) for v_step, mid_price in curves['mid_curve'] 
+            if v_step > 0 and v_step <= utilized_depth  # Ensure volume step is positive and within utilized depth
+        ]
+        
+        if not relevant_mid_curve_entries:
             return 0.0
 
-        for i, (mid_price, volume) in enumerate(curves['mid_curve']):
-            if i >= utilized_depth:
-                break
-
-            cumulative_volume += volume
-            distance = cumulative_volume / total_volume  # Normalized by total cumulative volume
-            weight = self.config.lambda_param * np.exp(-self.config.lambda_param * distance)
-
-            weighted_sum += mid_price * weight * volume
-            weight_sum += weight * volume
-
+        # Calculate the Normalization Factor (NF) first, as per methodology [142, Eq. 3]
+        # NF = sum(lambda * exp(-lambda * v)) for v in s, 2s, ... vT
+        for v_step, _ in relevant_mid_curve_entries:
+            normalization_factor_sum += lambda_param * np.exp(-lambda_param * v_step)
         
-        return weighted_sum / weight_sum if weight_sum > 0 else 0.0
+        if normalization_factor_sum == 0:
+            return 0.0  # Avoid division by zero, though unlikely with positive lambda and v_step
+
+        # Now calculate the weighted sum as per Eq. 3
+        # CCRTI_T = sum(midPV_T(v) * (1/NF) * lambda * exp(-lambda * v))
+        for v_step, mid_price_at_v in relevant_mid_curve_entries:
+            # The weight term is (1/NF) * lambda * exp(-lambda * v)
+            weight_term = (1 / normalization_factor_sum) * lambda_param * np.exp(-lambda_param * v_step)
+            weighted_sum += mid_price_at_v * weight_term
+            
+        return weighted_sum
     
     def format_single_line_display(self, order_books: List[OrderBookData], brti_value: float, 
                                   utilized_depth: float, dynamic_cap: float) -> str:
@@ -626,13 +641,13 @@ class OptimizedBRTI:
                 self.write_error_to_json("No consolidated order book data")
                 return None
             
-            # Calculate curves
+            # Calculate curves (now properly populates all curve types)
             curves = self.calculate_curves(consolidated_bids, consolidated_asks)
             
-            # Calculate utilized depth (with spacing parameter)
+            # Calculate utilized depth (now works with populated mid_spread_volume_curve)
             utilized_depth = self.calculate_utilized_depth(curves)
             
-            # Apply exponential weighting
+            # Apply exponential weighting (now uses CF Benchmarks methodology)
             brti_value = self.apply_exponential_weighting(curves, utilized_depth)
             
             # Get dynamic cap for display
