@@ -1,4 +1,3 @@
-# kalshirunner.py - Simplified display with integrated trading engine
 import asyncio
 import json
 import time
@@ -6,15 +5,12 @@ import sys
 import numpy as np
 import subprocess
 import signal
-import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from kalshi_bot.kalshi_client import KalshiClient
-
-# Import trading system components
 from trading_engine import TradingEngine
 from trading_logic import TradingLogic, MarketDataPoint, TradingDecision
 from portfolio import Portfolio

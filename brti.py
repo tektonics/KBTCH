@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 import sys
 
-# Configure logging
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -25,32 +25,27 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class OrderBookData:
-    """Structured order book data with metadata"""
     exchange_id: str
     symbol: str
     retrieval_timestamp: int
-    bids: List[Tuple[float, float]]  # [(price, size), ...]
+    bids: List[Tuple[float, float]]
     asks: List[Tuple[float, float]]
     is_valid: bool = True
     error_reason: Optional[str] = None
 
 @dataclass
 class BRTIConfig:
-    """Configuration parameters for BRTI calculation"""
-    # Data quality parameters
     max_data_age_seconds: int = 30
     max_price_deviation_pct: float = 5.0
     max_spread_volume_deviation_pct: float = 0.5
     
-    # Exponential weighting parameter
     lambda_param: float = 1.0
     
-    # Order book depth limits
     max_order_book_depth: int = 100
     
-    # Dynamic order size cap parameters - CF Benchmarks compliant
-    order_size_cap_trim_pct: float = 0.01  # 1% trimming from each side (CF spec)
-    order_size_cap_multiplier: float = 5.0  # CF formula: C_T = s + 5 * sigma
+    
+    order_size_cap_trim_pct: float = 0.01
+    order_size_cap_multiplier: float = 5.0
     
     # Spacing parameter
     spacing_parameter: float = 1.0  # s = 1 for Bitcoin BRTI

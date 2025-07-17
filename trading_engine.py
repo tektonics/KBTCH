@@ -1,4 +1,3 @@
-# trading_engine.py - Orchestrates trade execution and portfolio management
 import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
@@ -10,7 +9,6 @@ from order_manager import OrderManager, OrderResult
 from risk_manager import RiskManager, OrderSignal
 from config import TRADING_CONFIG
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -22,15 +20,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class TradingEngine:
-    """
-    Trading engine that receives decisions from trading_logic.py and executes them
-    
-    This class orchestrates:
-    1. Receiving trading decisions from trading_logic.py
-    2. Converting decisions to orders via order_manager.py
-    3. Updating portfolio state
-    4. Providing status and performance tracking
-    """
     
     def __init__(self, mode: str = 'simulation', kalshi_client=None, config: Dict = None):
         self.mode = mode
@@ -298,14 +287,11 @@ class TradingEngine:
         
         self.emergency_shutdown = True
         
-        # Cancel all pending orders
         cancelled_count = self.order_manager.cancel_all_pending_orders()
         
-        # Create orders to close all positions
         close_orders = []
         for ticker, position in self.portfolio.positions.items():
             if position.quantity != 0:
-                # Create opposing order to close position
                 side = 'sell' if position.quantity > 0 else 'buy'
                 close_order = OrderSignal(
                     market_ticker=ticker,
