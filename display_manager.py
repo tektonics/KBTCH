@@ -131,7 +131,7 @@ class OHLCVMonitor:
             
             with open(self.data_file, 'r') as f:
                 data = json.load(f)
-                self.exchange_data = data.get("exchanges", {})
+                self.exchange_data = data
                 self.last_modified = current_modified
                 return self.exchange_data
                 
@@ -379,6 +379,11 @@ class DisplayManager:
             ]
             lines.append(f"Ladder: {' | '.join(strike_labels)}")
         
+        if ohlcv_data:
+            ohlcv_line = self._format_ohlcv_analysis(ohlcv_data)  # <- calls the method
+            if ohlcv_line:
+                lines.append(ohlcv_line)
+
         if active_markets:
             sorted_markets = sorted(active_markets, key=lambda m: m.strike)
             
@@ -388,6 +393,31 @@ class DisplayManager:
                     lines.append(line)
         
         return lines
+
+    def _format_ohlcv_analysis(self, ohlcv_data: Dict[str, Any]) -> str:
+        """Format pre-calculated OHLCV analysis"""
+        try:
+            analysis = ohlcv_data.get("analysis", {})
+            
+            parts = []
+            
+            # Volume spikes
+            volume_spikes = analysis.get("volume_spikes", [])
+            if volume_spikes:
+                parts.append(f"Vol Spike: {' '.join(volume_spikes)}")
+            
+            # RSI
+            rsi = analysis.get("rsi", 50)
+            parts.append(f"RSI: {rsi}")
+            
+            # Momentum
+            momentum = analysis.get("momentum", "→")
+            parts.append(f"Momentum: {momentum}")
+            
+            return " | ".join(parts)
+            
+        except Exception as e:
+            return f"OHLCV Error: {e}"
 
     def _format_market_line(self, market: MarketInfo) -> str:
         data = market.market_data
