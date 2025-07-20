@@ -106,8 +106,39 @@ class BTCPriceMonitor:
         std_dev = np.std(returns, ddof=1) if len(returns) > 1 else 0.0
         return std_dev * np.sqrt(525600)
 
+class OHLCVMonitor:
+    def __init__(self, data_file: str = "ohlcv_data.json"):
+        self.data_file = Path(data_file)
+        self.last_modified = None
+        self.last_check = 0
+        self.check_interval = 0.5
+        self.exchange_data = {}
+    
+    def get_ohlcv_data(self) -> Dict[str, Any]:
+        now = time.time()
+        if now - self.last_check < self.check_interval:
+            return self.exchange_data
+        
+        self.last_check = now
+        
+        try:
+            if not self.data_file.exists():
+                return {}
+            
+            current_modified = self.data_file.stat().st_mtime
+            if current_modified == self.last_modified:
+                return self.exchange_data
+            
+            with open(self.data_file, 'r') as f:
+                data = json.load(f)
+                self.exchange_data = data.get("exchanges", {})
+                self.last_modified = current_modified
+                return self.exchange_data
+                
+        except (json.JSONDecodeError, IOError):
+            return {}
+
 class BRTIManager:
-    """Lightweight BRTI process manager"""
     def __init__(self, script_path: str = "brti.py"):
         self.script_path = Path(script_path)
         self.process: Optional[subprocess.Popen] = None
@@ -170,6 +201,62 @@ class BRTIManager:
         finally:
             self.process = None
 
+class OHLCVManager:
+    def __init__(self, script_path: str = "OHLCV.py"):
+        self.script_path = Path(script_path)
+        self.process: Optional[subprocess.Popen] = None
+        self.data_file = Path("ohlcv_data.json")
+        
+    def is_ohlcv_running(self) -> bool:
+        if self.process is None or self.process.poll() is not None:
+            return False
+        if not self.data_file.exists():
+            return False
+        try:
+            last_modified = self.data_file.stat().st_mtime
+            return time.time() - last_modified < 10
+        except OSError:
+            return False
+    
+    async def start_ohlcv(self) -> bool:
+        if not self.script_path.exists():
+            return False
+        try:
+            self.process = subprocess.Popen(
+                [sys.executable, str(self.script_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            for _ in range(30):
+                if self.data_file.exists():
+                    try:
+                        with open(self.data_file, 'r') as f:
+                            data = json.load(f)
+                            if data.get("exchanges") and data.get("status") == "active":
+                                return True
+                    except (json.JSONDecodeError, IOError):
+                        pass
+                await asyncio.sleep(1)
+            return self.process.poll() is None
+        except Exception:
+            return False
+    
+    def stop_ohlcv(self):
+        if self.process is None:
+            return
+        try:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        except Exception:
+            pass
+        finally:
+            self.process = None
+
 class MarketSelector:
     def __init__(self, params: TradingParams):
         self.params = params
@@ -187,13 +274,12 @@ class MarketSelector:
     def calculate_adaptive_market_count(self, volatility: float, time_to_expiry_hours: float) -> int:
         base_count = self.params.base_market_count
         
-        # Volatility adjustments
         if volatility > self.params.volatility_threshold_high:
             base_count += 3
         elif volatility > self.params.volatility_threshold_low:
             base_count += 1
         
-        # Time decay adjustments
+       
         time_adjustments = {1: 3, 3: 2, 6: 1}
         for threshold, adjustment in time_adjustments.items():
             if time_to_expiry_hours < threshold:
@@ -208,7 +294,6 @@ class MarketSelector:
         
         target_count = self.calculate_adaptive_market_count(volatility, 1.0)
         
-        # Calculate distances and sort
         markets_with_distance = []
         for market in markets:
             strike = self.extract_strike_price(market["ticker"])
@@ -221,11 +306,9 @@ class MarketSelector:
                     'distance': distance
                 })
         
-        # Get closest markets
         markets_with_distance.sort(key=lambda x: x['distance'])
         selected = markets_with_distance[:target_count]
         
-        # Find primary and sort by strike
         primary_ticker = selected[0]['ticker'] if selected else None
         selected.sort(key=lambda x: x['strike'])
         
@@ -269,7 +352,8 @@ class DisplayManager:
         self.display_line_count = 0
     
     def format_market_display(self, active_markets: List[MarketInfo], btc_price: float, 
-                            volatility: float, brti_running: bool):
+                        volatility: float, brti_running: bool, ohlcv_running: bool, 
+                        ohlcv_data: Dict[str, Any]):
         try:
             edt_time = datetime.now(ZoneInfo("America/New_York"))
         except ImportError:
@@ -277,16 +361,16 @@ class DisplayManager:
         
         lines = []
         
-        # Header line with portfolio value
         vol_indicator = "🔥" if volatility > 1.0 else "📈" if volatility > 0.5 else "📊"
+        ohlcv_status = "🟢" if ohlcv_running else "🔴"
         brti_status = "🟢" if brti_running else "🔴"
-        
+
         header = (f"{edt_time.strftime('%H:%M:%S')} | "
                  f"BTC: ${btc_price:,.2f} | "
-                 f"BRTI: {brti_status}")
+                 f"BRTI: {brti_status} | "
+                 f"OHLCV: {ohlcv_status}")
         lines.append(header)
         
-        # Market ladder
         if active_markets:
             sorted_markets = sorted(active_markets, key=lambda m: m.strike)
             strike_labels = [
@@ -295,7 +379,6 @@ class DisplayManager:
             ]
             lines.append(f"Ladder: {' | '.join(strike_labels)}")
         
-        # Individual markets with simplified data
         if active_markets:
             sorted_markets = sorted(active_markets, key=lambda m: m.strike)
             
@@ -332,6 +415,8 @@ class VolatilityAdaptiveTrader:
         self.client = KalshiClient()
         self.btc_monitor = BTCPriceMonitor()
         self.brti_manager = BRTIManager()
+        self.ohlcv_manager = OHLCVManager()
+        self.ohlcv_monitor = OHLCVMonitor()
         self.params = TradingParams()
         self.market_selector = MarketSelector(self.params)
         self.display = DisplayManager()
@@ -387,12 +472,13 @@ class VolatilityAdaptiveTrader:
     async def initialize(self) -> bool:
         print("🚀 KBTCH Starting...")
         
-        # Start BRTI
         if not self.brti_manager.is_brti_running():
             await self.brti_manager.start_brti()
         
+        if not self.ohlcv_manager.is_ohlcv_running():
+            await self.ohlcv_manager.start_ohlcv()
+
         try:
-            # Get markets
             markets_data = self.client.get_markets(self.event_id)
             self.markets = markets_data.get("markets", [])
             
@@ -400,7 +486,6 @@ class VolatilityAdaptiveTrader:
                 print(f"❌ No markets found for {self.event_id}")
                 return False
             
-            # Wait for BTC price
             for _ in range(60):
                 btc_price = self.btc_monitor.get_current_price()
                 if btc_price:
@@ -467,32 +552,34 @@ class VolatilityAdaptiveTrader:
                 if not self.brti_manager.is_brti_running():
                     await self.brti_manager.start_brti()
                 
-                # Update BTC price
+               # Monitor OHLCV health
+                if not self.ohlcv_manager.is_ohlcv_running():
+                    await self.ohlcv_manager.start_ohlcv()
+
                 current_btc = self.btc_monitor.get_current_price()
                 if current_btc and current_btc != self.last_btc_price:
                     self.last_btc_price = current_btc
                     self.btc_updates += 1
                 
-                # Update volatility
                 new_volatility = self.btc_monitor.calculate_volatility()
                 if abs(new_volatility - self.current_volatility) > 0.1:
                     self.current_volatility = new_volatility
                     self.volatility_updates += 1
                     await self._update_market_subscriptions()
                 
-                # Update market data
                 for market in self.active_markets:
                     market.market_data = self.client.get_mid_prices(market.ticker)
                     if market.market_data:
-                        # Calculate spread for display
                         if market.market_data.yes_bid and market.market_data.yes_ask:
                             market.spread = market.market_data.yes_ask - market.market_data.yes_bid
                             market.spread_pct = (market.spread / market.market_data.yes_ask) * 100
                 
-                # Display
+                ohlcv_data = self.ohlcv_monitor.get_ohlcv_data()
+                
                 lines = self.display.format_market_display(
                     self.active_markets, self.last_btc_price, 
                     self.current_volatility, self.brti_manager.is_brti_running(),
+                    self.ohlcv_manager.is_ohlcv_running(), ohlcv_data
                 )
                 self.display.update_multiline_display(lines)
                 
@@ -509,6 +596,7 @@ class VolatilityAdaptiveTrader:
     async def _cleanup(self):
         self._restore_client_output()
         self.brti_manager.stop_brti()
+        self.ohlcv_manager.stop_ohlcv()
         try:
             await self.client.close()
         except:
