@@ -38,8 +38,7 @@ class TickerData:
     volume_delta: Optional[int] = None
     timestamp: Optional[float] = None
 
-    def get_price_color(self) -> str:  # ADD THIS METHOD
-        """Returns 'green', 'red', or 'gray' based on price change"""
+    def get_price_color(self) -> str:
         if self.price is None or self.previous_price is None:
             return 'gray'
         elif self.price > self.previous_price:
