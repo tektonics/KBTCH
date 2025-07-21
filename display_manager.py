@@ -395,22 +395,18 @@ class DisplayManager:
         return lines
 
     def _format_ohlcv_analysis(self, ohlcv_data: Dict[str, Any]) -> str:
-        """Format pre-calculated OHLCV analysis"""
         try:
             analysis = ohlcv_data.get("analysis", {})
             
             parts = []
             
-            # Volume spikes
             volume_spikes = analysis.get("volume_spikes", [])
             if volume_spikes:
                 parts.append(f"Vol Spike: {' '.join(volume_spikes)}")
             
-            # RSI
             rsi = analysis.get("rsi", 50)
             parts.append(f"RSI: {rsi}")
             
-            # Momentum
             momentum = analysis.get("momentum", "→")
             parts.append(f"Momentum: {momentum}")
             
@@ -634,7 +630,7 @@ class VolatilityAdaptiveTrader:
 
 async def main():
     missing_deps = []
-    dependencies = ['ccxt', 'numpy', 'kalshi_bot.kalshi_client', 'portfolio', 'trading_logic']
+    dependencies = ['ccxt', 'numpy', 'kalshi_bot.kalshi_client', 'portfolio']
     
     for dep in dependencies:
         try:
