@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 class OHLCVManager:
-    def __init__(self, output_file: str = "ohlcv_data.json"):
+    def __init__(self, output_file: str = "data/ohlcv_data.json"):
         self.output_file = Path(output_file)
         self.data_lock = threading.Lock()
         self.exchange_history = {}

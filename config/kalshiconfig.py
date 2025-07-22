@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
 # Environment Configuration (defaults to demo)
-KALSHI_ENVIRONMENT = os.getenv("KALSHI_ENV", "demo").lower()
+KALSHI_ENVIRONMENT = os.getenv("KALSHI_ENV", "production").lower()
 
 # Base URLs for REST API and WebSockets
 if KALSHI_ENVIRONMENT == "production":

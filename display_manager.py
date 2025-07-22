@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from data.newKalshi_client import KalshiClient
 from trading.portfolio import Portfolio
 
-
 @dataclass
 class MarketInfo:
     ticker: str
@@ -521,7 +520,7 @@ class VolatilityAdaptiveTrader:
             else:
                 print("❌ No BTC price data")
                 return False
-            
+
             await asyncio.sleep(2)
             self.current_volatility = self.btc_monitor.calculate_volatility()
             await self._update_market_subscriptions()
@@ -571,9 +570,9 @@ class VolatilityAdaptiveTrader:
             while not self.shutdown_requested:
                 current_time = time.time()
                 
+                
                 if not self.brti_manager.is_brti_running():
                     await self.brti_manager.start_brti()
-                
                 if not self.ohlcv_manager.is_ohlcv_running():
                     await self.ohlcv_manager.start_ohlcv()
 
@@ -626,6 +625,7 @@ class VolatilityAdaptiveTrader:
 async def main():
     missing_deps = []
     dependencies = ['ccxt', 'numpy', 'data.kalshi_client', 'trading.portfolio']
+
     
     for dep in dependencies:
         try:
@@ -640,10 +640,6 @@ async def main():
         print("❌ Missing dependencies:")
         for dep in missing_deps:
             print(f"   - {dep}")
-        return
-    
-    if not Path("data/brti.py").exists():
-        print("❌ brti.py not found")
         return
     
     trader = VolatilityAdaptiveTrader()

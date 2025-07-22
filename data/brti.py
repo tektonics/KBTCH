@@ -54,7 +54,7 @@ class BRTIConfig:
     calculation_interval_seconds: float = 1.0
     
     # JSON output configuration
-    json_output_file: str = "/aggregate_price.json"
+    json_output_file: str = "data/aggregate_price.json"
 
 class OptimizedBRTI:
     
@@ -738,7 +738,6 @@ def main():
         order_size_cap_trim_pct=0.01,  # 1% trimming from each side (CF spec)
         order_size_cap_multiplier=5.0,  # CF formula: C_T = s + 5 * sigma
         calculation_interval_seconds=1.0,
-        json_output_file="aggregate_price.json"  # Output file for price data
     )
     
     # Initialize BRTI calculator

@@ -12,12 +12,11 @@ from pathlib import Path
 import requests
 import websockets
 from dotenv import load_dotenv
-
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import configuration
 from config.kalshiconfig import (
@@ -201,7 +200,7 @@ class KalshiClient:
         data = msg.get("msg", {})
         market_ticker = data.get("market_ticker")
 
-        if not market_ticker:
+        if not market_ticker and msg_type != "subscribed":
             logger.warning(f"Message missing market_ticker for type: {msg_type}")
             return
 
