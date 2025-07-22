@@ -1,3 +1,4 @@
+import sys
 import os
 import base64
 import time
@@ -10,11 +11,22 @@ from dataclasses import dataclass
 from pathlib import Path
 import requests
 import websockets
-from dotenv import load_dotenv
-
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# Import configuration
+from config.kalshiconfig import (
+    REST_API_BASE_URL,
+    WEBSOCKET_API_URL, 
+    KALSHI_API_KEY_ID,
+    KALSHI_PRIVATE_KEY_PATH,
+    API_ENDPOINTS,
+    WS_CHANNELS,
+    REQUEST_HEADERS
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,8 +36,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
-load_dotenv()
 
 @dataclass
 class TickerData:
@@ -50,10 +60,13 @@ class TickerData:
 
 class KalshiClient:
     def __init__(self):
-        self.base_url = "https://api.elections.kalshi.com"
-        self.ws_url = "wss://api.elections.kalshi.com/trade-api/ws/v2"
-        self.key_id = os.getenv("KALSHI_API_KEY")
-        self.private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+        # Use configuration values instead of hardcoded URLs
+        self.base_url = REST_API_BASE_URL
+        self.ws_url = WEBSOCKET_API_URL
+        
+        # Use configuration environment variable names
+        self.key_id = KALSHI_API_KEY_ID
+        self.private_key_path = KALSHI_PRIVATE_KEY_PATH
 
         if not self.key_id or not self.private_key_path:
             raise ValueError("Missing required environment variables: KALSHI_API_KEY and KALSHI_PRIVATE_KEY_PATH")
@@ -101,15 +114,17 @@ class KalshiClient:
     def _build_auth_headers(self, method: str, path: str) -> Dict[str, str]:
         timestamp = str(int(time.time() * 1000))
         signature = self._generate_signature(timestamp, method, path)
-        return {
+        headers = REQUEST_HEADERS.copy()
+        headers.update({
             "KALSHI-ACCESS-KEY": self.key_id,
             "KALSHI-ACCESS-TIMESTAMP": timestamp,
             "KALSHI-ACCESS-SIGNATURE": signature,
-        }
+        })
+        return headers
 
     def get_markets(self, event_ticker: str) -> Dict[str, Any]:
         method = "GET"
-        path = "/trade-api/v2/markets"
+        path = API_ENDPOINTS["GET_MARKETS"]
         params = {"event_ticker": event_ticker}
         headers = self._build_auth_headers(method, path)
         url = self.base_url + path
@@ -141,7 +156,10 @@ class KalshiClient:
                     break
 
     async def _connect_and_subscribe(self, market_ticker: str):
-        path = "/trade-api/ws/v2"
+        # Use WebSocket path from URL parsing
+        from urllib.parse import urlparse
+        parsed_url = urlparse(self.ws_url)
+        path = parsed_url.path
         method = "GET"
         headers = self._build_auth_headers(method, path)
 
@@ -158,7 +176,7 @@ class KalshiClient:
                 "id": 1,
                 "cmd": "subscribe",
                 "params": {
-                    "channels": ["ticker_v2", "orderbook_delta"],
+                    "channels": [WS_CHANNELS["TICKER_V2"], WS_CHANNELS["ORDERBOOK_DELTA"]],
                     "market_ticker": market_ticker
                 }
             }
@@ -179,7 +197,7 @@ class KalshiClient:
         data = msg.get("msg", {})
         market_ticker = data.get("market_ticker")
 
-        if not market_ticker:
+        if not market_ticker and msg_type != "subscribed":
             logger.warning(f"Message missing market_ticker for type: {msg_type}")
             return
 

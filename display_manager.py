@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
-from data.newKalshi_client import KalshiClient
+from data.kalshi_client import KalshiClient
 from trading.portfolio import Portfolio
 
 @dataclass
