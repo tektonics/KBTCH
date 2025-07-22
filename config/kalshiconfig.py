@@ -8,10 +8,10 @@ KALSHI_ENVIRONMENT = os.getenv("KALSHI_ENV", "production").lower()
 
 # Base URLs for REST API and WebSockets
 if KALSHI_ENVIRONMENT == "production":
-    REST_API_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+    REST_API_BASE_URL = "https://api.elections.kalshi.com"
     WEBSOCKET_API_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 else:
-    REST_API_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
+    REST_API_BASE_URL = "https://demo-api.kalshi.co"
     WEBSOCKET_API_URL = "wss://demo-api.kalshi.co/trade-api/ws/v2"
 
 # API Key Management
@@ -20,19 +20,19 @@ KALSHI_PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH")
 
 # REST API Endpoints (paths relative to REST_API_BASE_URL)
 API_ENDPOINTS = {
-    "GET_BALANCE": "/portfolio/balance",
-    "GET_FILLS": "/portfolio/fills",
-    "GET_ORDERS": "/portfolio/orders",
-    "CREATE_ORDER": "/portfolio/orders", #used to buy and sell
-    "BATCH_CREATE_ORDERS": "/portfolio/batch-create-orders",
-    "CANCEL_ORDER": "/portfolio/orders",
-    "BATCH_CANCEL_ORDERS": "/portfolio/batch-cancel-orders",
-    "AMEND_ORDER": "/portfolio/amend-order",
-    "DECREASE_ORDER": "/portfolio/decrease-order",
-    "GET_POSITIONS": "/portfolio/positions",
-    "GET_MARKETS": "/markets",
-    "GET_MARKET_ORDERBOOK": "/markets/{market_ticker}/orderbook",
-    "GET_TRADES": "/trades",
+    "GET_BALANCE": "/trade-api/v2/portfolio/balance",  # Full path
+    "GET_FILLS": "/trade-api/v2/portfolio/fills",
+    "GET_ORDERS": "/trade-api/v2/portfolio/orders",
+    "CREATE_ORDER": "/trade-api/v2/portfolio/orders",
+    "BATCH_CREATE_ORDERS": "/trade-api/v2/portfolio/batch-create-orders",
+    "CANCEL_ORDER": "/trade-api/v2/portfolio/orders",
+    "BATCH_CANCEL_ORDERS": "/trade-api/v2/portfolio/batch-cancel-orders",
+    "AMEND_ORDER": "/trade-api/v2/portfolio/amend-order",
+    "DECREASE_ORDER": "/trade-api/v2/portfolio/decrease-order",
+    "GET_POSITIONS": "/trade-api/v2/portfolio/positions",
+    "GET_MARKETS": "/trade-api/v2/markets",
+    "GET_MARKET_ORDERBOOK": "/trade-api/v2/markets/{market_ticker}/orderbook",
+    "GET_TRADES": "/trade-api/v2/trades",
 }
 
 # WebSocket Channels for real-time data

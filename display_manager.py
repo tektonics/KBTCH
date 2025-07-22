@@ -334,6 +334,76 @@ class DisplayManager:
             sys.stdout.flush()
             self.display_line_count = 0
     
+    def format_portfolio_display(self, portfolio_data: Dict) -> List[str]:
+        """Format portfolio information directly from Kalshi data"""
+        lines = []
+        
+        try:
+            if not portfolio_data:
+                lines.append("💰 Portfolio: No data")
+                return lines
+            
+            balance_data = portfolio_data.get('balance', {})
+            positions_data = portfolio_data.get('positions', {})
+            
+            # Portfolio summary line
+            cash = balance_data.get('balance', 0) / 100  # Convert cents to dollars
+            
+            # Calculate total value and P&L from positions
+            total_value = cash
+            total_pnl = 0
+            
+            positions = positions_data.get('positions', [])
+            for pos in positions:
+                market_value = (pos.get('quantity', 0) * pos.get('market_price', 0)) / 100
+                total_value += market_value
+                
+                avg_price = pos.get('average_price', 0) / 100
+                current_price = pos.get('market_price', 0) / 100
+                quantity = pos.get('quantity', 0)
+                total_pnl += quantity * (current_price - avg_price)
+            
+            pnl_indicator = "📈" if total_pnl >= 0 else "📉"
+            pnl_sign = "+" if total_pnl >= 0 else ""
+            
+            portfolio_line = (f"💰 Cash: ${cash:,.2f} | "
+                            f"Value: ${total_value:,.2f} | "
+                            f"P&L: {pnl_indicator}{pnl_sign}${total_pnl:,.2f}")
+            lines.append(portfolio_line)
+            
+            # Individual positions
+            if positions:
+                lines.append("📊 Positions:")
+                for pos in positions:
+                    ticker = pos.get('market_ticker', '')
+                    quantity = pos.get('quantity', 0)
+                    avg_price = pos.get('average_price', 0) / 100
+                    current_price = pos.get('market_price', 0) / 100
+                    position_pnl = quantity * (current_price - avg_price)
+                    
+                    if quantity == 0:
+                        continue
+                    
+                    pnl_symbol = "📈" if position_pnl >= 0 else "📉"
+                    side_symbol = "🟢" if quantity > 0 else "🔴"
+                    
+                    # Extract strike from ticker for display
+                    strike = self._extract_strike_from_ticker(ticker)
+                    display_ticker = f"${strike:,.0f}" if strike else ticker[-6:]
+                    
+                    pos_line = (f"  {side_symbol} {display_ticker}: "
+                              f"{abs(quantity)} @ ${avg_price:.2f} "
+                              f"(${current_price:.2f}) "
+                              f"{pnl_symbol}${position_pnl:+.2f}")
+                    lines.append(pos_line)
+            else:
+                lines.append("📊 No positions")
+                
+        except Exception as e:
+            lines.append(f"Portfolio error: {e}")
+        
+        return lines
+
     def update_multiline_display(self, lines: list):
         self.clear_display()
         
@@ -352,7 +422,7 @@ class DisplayManager:
     
     def format_market_display(self, active_markets: List[MarketInfo], btc_price: float, 
                         volatility: float, brti_running: bool, ohlcv_running: bool, 
-                        ohlcv_data: Dict[str, Any]):
+                        ohlcv_data: Dict[str, Any], portfolio_data: Optional[Dict] = None):
         try:
             edt_time = datetime.now(ZoneInfo("America/New_York"))
         except ImportError:
@@ -365,11 +435,16 @@ class DisplayManager:
         brti_status = "🟢" if brti_running else "🔴"
 
         header = (f"{edt_time.strftime('%H:%M:%S')} | "
-                 f"BTC: ${btc_price:,.2f} | "
+                 f"BTC: ${btc_price:,.2f} {vol_indicator} | "
                  f"BRTI: {brti_status} | "
                  f"OHLCV: {ohlcv_status}")
         lines.append(header)
         
+        if portfolio_data:
+                portfolio_lines = self.format_portfolio_display(portfolio_data)
+                lines.extend(portfolio_lines)
+                lines.append("")
+
         if active_markets:
             sorted_markets = sorted(active_markets, key=lambda m: m.strike)
             strike_labels = [
@@ -452,6 +527,10 @@ class VolatilityAdaptiveTrader:
         self.last_btc_price = None
         self.current_volatility = 0.0
         self.shutdown_requested = False
+
+        self.portfolio_data = {}
+        self.last_portfolio_update = 0
+        self.portfolio_update_interval = 5
         
         self.btc_updates = 0
         self.market_updates = 0
@@ -461,6 +540,28 @@ class VolatilityAdaptiveTrader:
         self._setup_signal_handlers()
         self._silence_client_output()
     
+    async def _update_portfolio_data(self):
+        """Update portfolio data directly from Kalshi client"""
+        current_time = time.time()
+        if current_time - self.last_portfolio_update < self.portfolio_update_interval:
+            return
+        
+        try:
+            # Get data directly from Kalshi client
+            balance_data = self.client.get_balance()
+            positions_data = self.client.get_positions()
+            
+            self.portfolio_data = {
+                'balance': balance_data,
+                'positions': positions_data,
+                'last_update': current_time
+            }
+            
+            self.last_portfolio_update = current_time
+        except Exception as e:
+            print(f"Portfolio update error: {e}")
+
+
     def _generate_current_event_id(self) -> str:
         try:
             edt_tz = ZoneInfo("America/New_York")
@@ -586,7 +687,9 @@ class VolatilityAdaptiveTrader:
                     self.current_volatility = new_volatility
                     self.volatility_updates += 1
                     await self._update_market_subscriptions()
-                
+              
+                await self._update_portfolio_data()
+
                 for market in self.active_markets:
                     market.market_data = self.client.get_mid_prices(market.ticker)
                     if market.market_data:
@@ -599,7 +702,7 @@ class VolatilityAdaptiveTrader:
                 lines = self.display.format_market_display(
                     self.active_markets, self.last_btc_price, 
                     self.current_volatility, self.brti_manager.is_brti_running(),
-                    self.ohlcv_manager.is_ohlcv_running(), ohlcv_data
+                    self.ohlcv_manager.is_ohlcv_running(), ohlcv_data, self.portfolio_data
                 )
                 self.display.update_multiline_display(lines)
                 
