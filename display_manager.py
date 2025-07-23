@@ -335,7 +335,6 @@ class DisplayManager:
             self.display_line_count = 0
     
     def format_portfolio_display(self, portfolio_data: Dict) -> List[str]:
-        """Format portfolio information directly from Kalshi data"""
         lines = []
         
         try:
@@ -346,10 +345,8 @@ class DisplayManager:
             balance_data = portfolio_data.get('balance', {})
             positions_data = portfolio_data.get('positions', {})
             
-            # Portfolio summary line
-            cash = balance_data.get('balance', 0) / 100  # Convert cents to dollars
+            cash = balance_data.get('balance', 0) / 100
             
-            # Calculate total value and P&L from positions
             total_value = cash
             total_pnl = 0
             
@@ -366,15 +363,17 @@ class DisplayManager:
             pnl_indicator = "📈" if total_pnl >= 0 else "📉"
             pnl_sign = "+" if total_pnl >= 0 else ""
             
+            active_positions = [pos for pos in positions if pos.get('quantity', 0) != 0]
+            position_status = f"📊 {len(active_positions)} positions" if active_positions else "📊 No positions"
+
             portfolio_line = (f"💰 Cash: ${cash:,.2f} | "
                             f"Value: ${total_value:,.2f} | "
-                            f"P&L: {pnl_indicator}{pnl_sign}${total_pnl:,.2f}")
+                            f"P&L: {pnl_indicator}{pnl_sign}${total_pnl:,.2f} | "
+                            f"{position_status}")
             lines.append(portfolio_line)
             
-            # Individual positions
-            if positions:
-                lines.append("📊 Positions:")
-                for pos in positions:
+            if active_positions:
+                for pos in active_positions:
                     ticker = pos.get('market_ticker', '')
                     quantity = pos.get('quantity', 0)
                     avg_price = pos.get('average_price', 0) / 100
@@ -387,7 +386,6 @@ class DisplayManager:
                     pnl_symbol = "📈" if position_pnl >= 0 else "📉"
                     side_symbol = "🟢" if quantity > 0 else "🔴"
                     
-                    # Extract strike from ticker for display
                     strike = self._extract_strike_from_ticker(ticker)
                     display_ticker = f"${strike:,.0f}" if strike else ticker[-6:]
                     
@@ -396,8 +394,6 @@ class DisplayManager:
                               f"(${current_price:.2f}) "
                               f"{pnl_symbol}${position_pnl:+.2f}")
                     lines.append(pos_line)
-            else:
-                lines.append("📊 No positions")
                 
         except Exception as e:
             lines.append(f"Portfolio error: {e}")
