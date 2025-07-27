@@ -107,19 +107,15 @@ class Portfolio:
         return None
     
     def sync_with_kalshi(self) -> bool:
-        """Sync entire portfolio with Kalshi data"""
         if not self.kalshi_client:
             logger.warning("Kalshi client not configured")
             return False
         
         try:
-            # Sync balance
             balance_success = self.fetch_kalshi_balance() is not None
             
-            # Sync positions
             positions_success = self.fetch_kalshi_positions() is not None
             
-            # Sync recent fills
             fills_success = self.fetch_kalshi_fills() is not None
             
             success = balance_success and positions_success and fills_success
@@ -135,15 +131,13 @@ class Portfolio:
             return False
     
     def _sync_kalshi_positions(self, kalshi_positions: List[Dict]):
-        """Sync local positions with Kalshi position data"""
-        # Clear existing positions
         self.positions.clear()
         
         for pos_data in kalshi_positions:
             try:
                 market_ticker = pos_data.get('market_ticker')
                 quantity = pos_data.get('quantity', 0)
-                avg_price = pos_data.get('average_price', 0) / 100  # Convert cents to dollars
+                avg_price = pos_data.get('average_price', 0) / 100
                 current_price = pos_data.get('market_price', avg_price) / 100
                 
                 if market_ticker and quantity != 0:
@@ -159,15 +153,13 @@ class Portfolio:
                 logger.error(f"Error parsing Kalshi position {pos_data}: {e}")
     
     def _sync_kalshi_fills(self, kalshi_fills: List[Dict]):
-        """Sync local trades with Kalshi fill data"""
-        # Only sync recent fills to avoid duplicates
         recent_fills = [f for f in kalshi_fills if self._is_recent_fill(f)]
         
         for fill_data in recent_fills:
             try:
                 market_ticker = fill_data.get('market_ticker')
                 quantity = fill_data.get('quantity', 0)
-                price = fill_data.get('price', 0) / 100  # Convert cents to dollars
+                price = fill_data.get('price', 0) / 100
                 side = 'buy' if fill_data.get('side') == 'yes' else 'sell'
                 fill_time = fill_data.get('created_time')
                 
@@ -182,7 +174,6 @@ class Portfolio:
                         timestamp=timestamp
                     )
                     
-                    # Check if we already have this fill
                     if not self._has_duplicate_trade(trade):
                         self.trades.append(trade)
                         
@@ -190,7 +181,6 @@ class Portfolio:
                 logger.error(f"Error parsing Kalshi fill {fill_data}: {e}")
     
     def _is_recent_fill(self, fill_data: Dict) -> bool:
-        """Check if fill is recent (within last 24 hours)"""
         try:
             fill_time = fill_data.get('created_time')
             if not fill_time:
@@ -198,12 +188,11 @@ class Portfolio:
             
             fill_datetime = datetime.fromisoformat(fill_time.replace('Z', '+00:00'))
             now = datetime.now(fill_datetime.tzinfo)
-            return (now - fill_datetime).total_seconds() < 86400  # 24 hours
+            return (now - fill_datetime).total_seconds() < 86400
         except:
             return False
     
     def _has_duplicate_trade(self, new_trade: Trade) -> bool:
-        """Check if trade already exists to avoid duplicates"""
         for existing_trade in self.trades:
             if (existing_trade.market_ticker == new_trade.market_ticker and
                 existing_trade.quantity == new_trade.quantity and
@@ -215,7 +204,6 @@ class Portfolio:
         return False
     
     def update_market_prices_from_kalshi(self):
-        """Update current market prices using Kalshi client"""
         if not self.kalshi_client:
             logger.warning("Kalshi client not configured")
             return
@@ -224,38 +212,32 @@ class Portfolio:
             try:
                 ticker_data = self.kalshi_client.get_mid_prices(ticker)
                 if ticker_data and ticker_data.price is not None:
-                    self.positions[ticker].current_price = ticker_data.price / 100  # Convert cents to dollars
+                    self.positions[ticker].current_price = ticker_data.price / 100
             except Exception as e:
                 logger.error(f"Error updating price for {ticker}: {e}")
         
         logger.info("Updated market prices from Kalshi")
 
     def add_trade(self, market_ticker: str, quantity: int, price: float, side: str):
-        """Add a new trade and update positions"""
         trade = Trade(market_ticker, quantity, price, side)
         self.trades.append(trade)
         
-        # Update cash
         trade_value = quantity * price
         if side == 'buy':
             self.cash -= trade_value
         else:
             self.cash += trade_value
         
-        # Update positions
         self._update_position(market_ticker, quantity if side == 'buy' else -quantity, price)
         
         return trade
     
     def _update_position(self, market_ticker: str, quantity: int, price: float):
-        """Update position with new trade"""
         if market_ticker in self.positions:
             position = self.positions[market_ticker]
             
-            # Calculate new average price
             total_quantity = position.quantity + quantity
             if total_quantity == 0:
-                # Position closed
                 del self.positions[market_ticker]
                 return
             
@@ -265,39 +247,31 @@ class Portfolio:
             position.quantity = total_quantity
             position.avg_price = new_avg_price
         else:
-            # New position
             if quantity != 0:
                 self.positions[market_ticker] = Position(market_ticker, quantity, price)
     
     def update_market_prices(self, price_data: Dict[str, float]):
-        """Update current market prices for all positions"""
         for ticker, price in price_data.items():
             if ticker in self.positions:
                 self.positions[ticker].current_price = price
     
     def get_position(self, market_ticker: str) -> Position:
-        """Get position for a specific market"""
         return self.positions.get(market_ticker)
     
     def get_total_exposure(self) -> float:
-        """Get total market exposure across all positions"""
         return sum(abs(pos.market_value) for pos in self.positions.values())
     
     def get_market_exposure(self, market_ticker: str) -> float:
-        """Get exposure for a specific market"""
         position = self.positions.get(market_ticker)
         return abs(position.market_value) if position else 0.0
     
     def get_portfolio_value(self) -> float:
-        """Get total portfolio value (cash + positions)"""
         return self.cash + sum(pos.market_value for pos in self.positions.values())
     
     def get_unrealized_pnl(self) -> float:
-        """Get total unrealized P&L across all positions"""
         return sum(pos.unrealized_pnl for pos in self.positions.values())
     
     def get_realized_pnl(self) -> float:
-        """Get realized P&L from closed positions"""
         return self.get_portfolio_value() - self.initial_cash - self.get_unrealized_pnl()
     
     def get_daily_pnl(self) -> float:
@@ -364,7 +338,6 @@ class Portfolio:
             self.cash = state['cash']
             self.initial_cash = state['initial_cash']
             
-            # Restore positions
             self.positions = {}
             for pos_data in state['positions']:
                 pos = Position(
@@ -376,7 +349,6 @@ class Portfolio:
                 )
                 self.positions[pos.market_ticker] = pos
             
-            # Restore trades
             self.trades = []
             for trade_data in state['trades']:
                 trade = Trade(
