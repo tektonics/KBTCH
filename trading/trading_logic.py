@@ -8,26 +8,12 @@ from risk_manager import RiskManager, OrderSignal
 from strategy import Strategy
 
 @dataclass
-class MarketDataPoint:
-    """Standardized market data structure"""
-    ticker: str
-    strike: float
-    yes_bid: Optional[float] = None
-    yes_ask: Optional[float] = None
-    no_bid: Optional[float] = None
-    no_ask: Optional[float] = None
-    price: Optional[float] = None
-    volume_delta: Optional[int] = None
-    timestamp: Optional[float] = None
-
-@dataclass
 class TradingDecision:
-    """Standardized trading decision output"""
     ticker: str
-    action: str  # BUY_YES, SELL_YES, BUY_NO, SELL_NO, HOLD, NO_TRADE
+    action: str  
     quantity: int
     price: float
-    confidence: float  # 0-1 scale
+    confidence: float
     edge: float
     spread_pct: float
     reason: str
@@ -35,7 +21,6 @@ class TradingDecision:
     risk_approved: bool = False
 
 class TradingLogic:
-    """Central decision making engine"""
     
     def __init__(self, strategy: Strategy, risk_manager: RiskManager, config: Dict[str, Any]):
         self.strategy = strategy
@@ -52,50 +37,42 @@ class TradingLogic:
         self.market_cache = {}
         self.last_analysis_time = {}
     
-    def make_trading_decisions(self, btc_price: float, market_data: List[MarketDataPoint], 
-                              portfolio: Portfolio, volatility: float = 0.0) -> List[TradingDecision]:
-        """
-        Central decision making method that orchestrates all inputs
-        
-        Flow:
-        1. Analyze each market for trading opportunities
-        2. Get strategy recommendations
-        3. Apply risk management
-        4. Return final trading decisions
-        """
+    def make_trading_decisions(self, trader: VolatilityAdaptiveTrader) -> List[TradingDecision]:
         decisions = []
-        
-        if not btc_price or not market_data:
+   
+        markets = trader.active_markets
+        btc_price = trader.last_btc_price
+        volatility = trader.current_volatility
+        portfolio_data = trader.portfolio_data
+        ohlcv_data = trader.ohlcv_monitor.get_ohlcv_data()
+        brti_running = trader.brti_manager.is_brti_running()
+        btc_monitor = trader.btc_monitor
+   
+        if not btc_price or not markets:
             return decisions
-        
-        # Process each market
-        for market_point in market_data:
+   
+        portfolio = self._create_portfolio_from_kalshi_data(portfolio_data)
+   
+        for market in markets:
             try:
-                # 1. Analyze market opportunity
-                market_analysis = self._analyze_market_opportunity(
-                    market_point, btc_price, volatility
-                )
-                
+                if not market.market_data:
+                    continue
+               
+                market_analysis = self._analyze_market_opportunity(market, btc_price, volatility, ohlcv_data, brti_running)
+           
                 if not market_analysis:
                     continue
-                
-                # 2. Get strategy signal
-                strategy_signal = self._get_strategy_signal(
-                    market_point, market_analysis, portfolio
-                )
-                
+           
+                strategy_signal = self._get_strategy_signal(market, market_analysis, portfolio, btc_monitor)
+           
                 if strategy_signal['action'] == 'NO_TRADE':
                     continue
-                
-                # 3. Apply risk management
-                risk_validated_signal = self._apply_risk_management(
-                    strategy_signal, portfolio, market_analysis
-                )
-                
-                # 4. Create trading decision
+           
+                risk_validated_signal = self._apply_risk_management(strategy_signal, portfolio, market_analysis)
+           
                 if risk_validated_signal['approved']:
                     decision = TradingDecision(
-                        ticker=market_point.ticker,
+                        ticker=market.ticker,
                         action=risk_validated_signal['action'],
                         quantity=risk_validated_signal['quantity'],
                         price=risk_validated_signal['price'],
@@ -107,11 +84,11 @@ class TradingLogic:
                         risk_approved=True
                     )
                     decisions.append(decision)
-                
+               
             except Exception as e:
-                print(f"Error processing {market_point.ticker}: {e}")
+                print(f"Error processing {market.ticker}: {e}")
                 continue
-        
+   
         return decisions
     
     def _analyze_market_opportunity(self, market_data: MarketDataPoint, 

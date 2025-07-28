@@ -28,7 +28,7 @@ class TradingParams:
     base_market_count: int = 3
     volatility_threshold_low: float = 0.5
     volatility_threshold_high: float = 1.0
-    max_markets: int = 7
+    max_markets: int = 5
 
 @dataclass
 class TradeExecutionInfo:
@@ -46,7 +46,7 @@ class BTCPriceMonitor:
         self.last_price = None
         self.last_modified = None
         self.last_check = 0
-        self.check_interval = 0.5
+        self.check_interval = 0.05
         self.price_history = []
         self.max_history_minutes = 30
     
@@ -110,7 +110,7 @@ class OHLCVMonitor:
         self.data_file = Path(data_file)
         self.last_modified = None
         self.last_check = 0
-        self.check_interval = 0.5
+        self.check_interval = 0.05
         self.exchange_data = {}
     
     def get_ohlcv_data(self) -> Dict[str, Any]:
@@ -703,7 +703,7 @@ class VolatilityAdaptiveTrader:
                 self.display.update_multiline_display(lines)
                 
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.05)
                 
         except KeyboardInterrupt:
             self.display.print_new_line("\n🛑 Shutting down...")
