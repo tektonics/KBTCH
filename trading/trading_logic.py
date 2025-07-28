@@ -3,9 +3,9 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 import time
 from dataclasses import dataclass
-from portfolio import Portfolio
-from risk_manager import RiskManager, OrderSignal
-from strategy import Strategy
+from trading.portfolio import Portfolio
+from trading.risk_manager import RiskManager, OrderSignal
+from trading.strategy import Strategy
 
 @dataclass
 class TradingDecision:

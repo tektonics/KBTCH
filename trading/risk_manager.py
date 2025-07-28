@@ -3,8 +3,8 @@ Risk management and order validation
 """
 from dataclasses import dataclass
 from typing import List, Dict, Optional
-from portfolio import Portfolio
-from config import TRADING_CONFIG
+from trading.portfolio import Portfolio
+from config.config import TRADING_CONFIG
 
 @dataclass
 class OrderSignal:

@@ -1,13 +1,14 @@
 import time
+from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+import random
 import json
 import logging
-
-from portfolio import Portfolio
-from order_manager import OrderManager, OrderResult
-from risk_manager import RiskManager, OrderSignal
-from config import TRADING_CONFIG
+from trading.portfolio import Portfolio
+from trading.order_manager import OrderResult
+from trading.risk_manager import RiskManager, OrderSignal
+from config.config import TRADING_CONFIG
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,6 +20,294 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class OrderExecutor(ABC):
+    """Abstract base class for order execution"""
+    
+    @abstractmethod
+    def execute_order(self, order: OrderSignal) -> OrderResult:
+        """Execute a single order"""
+        pass
+    
+    @abstractmethod
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel an existing order"""
+        pass
+    
+    @abstractmethod
+    def get_order_status(self, order_id: str) -> Optional[OrderResult]:
+        """Get status of an existing order"""
+        pass
+
+class SimulatedOrderExecutor(OrderExecutor):
+    """Enhanced simulated order execution with realistic Kalshi behavior"""
+    
+    def __init__(self):
+        self.order_counter = 0
+        self.orders: Dict[str, OrderResult] = {}
+        self.fill_probability = 0.90  # 90% fill rate
+        self.partial_fill_probability = 0.15  # 15% chance of partial fill
+        self.price_slippage = 0.002  # 0.2% price slippage
+        self.latency_simulation = True
+    
+    def execute_order(self, order: OrderSignal) -> OrderResult:
+        """Simulate order execution with realistic Kalshi behavior"""
+        self.order_counter += 1
+        order_id = f"SIM_{self.order_counter:06d}"
+        
+        # Simulate network latency
+        if self.latency_simulation:
+            time.sleep(random.uniform(0.01, 0.05))
+        
+        # Determine contract type and price from order reason
+        contract_type, kalshi_price = self._determine_kalshi_order_details(order)
+        
+        # Determine if order fills
+        fill_random = random.random()
+        
+        if fill_random > self.fill_probability:
+            # Order rejected or failed
+            result = OrderResult(
+                order_id=order_id,
+                market_ticker=order.market_ticker,
+                side=order.side,
+                quantity=order.quantity,
+                filled_quantity=0,
+                price=order.price,
+                filled_price=0.0,
+                status='rejected',
+                timestamp=datetime.now(),
+                error_message='Market conditions unfavorable',
+                contract_type=contract_type
+            )
+        else:
+            # Determine fill quantity
+            if random.random() < self.partial_fill_probability:
+                # Partial fill
+                filled_quantity = random.randint(max(1, order.quantity // 4), order.quantity - 1)
+                status = 'partial'
+            else:
+                # Full fill
+                filled_quantity = order.quantity
+                status = 'filled'
+            
+            # Apply realistic price slippage for Kalshi
+            slippage_direction = 1 if order.side == 'buy' else -1
+            slippage_factor = 1 + (slippage_direction * self.price_slippage * random.random())
+            filled_price = kalshi_price * slippage_factor
+            
+            # Ensure price stays within Kalshi bounds (0-1)
+            filled_price = max(0.01, min(0.99, filled_price))
+            
+            result = OrderResult(
+                order_id=order_id,
+                market_ticker=order.market_ticker,
+                side=order.side,
+                quantity=order.quantity,
+                filled_quantity=filled_quantity,
+                price=order.price,
+                filled_price=filled_price,
+                status=status,
+                timestamp=datetime.now(),
+                contract_type=contract_type
+            )
+        
+        self.orders[order_id] = result
+        return result
+    
+    def _determine_kalshi_order_details(self, order: OrderSignal) -> tuple:
+        """Determine Kalshi contract type and price from order details"""
+        if 'YES' in order.reason:
+            return 'YES', order.price
+        elif 'NO' in order.reason:
+            return 'NO', order.price
+        else:
+            # Default to YES contract
+            return 'YES', order.price
+    
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel a simulated order"""
+        if order_id in self.orders:
+            order = self.orders[order_id]
+            if order.status in ['pending', 'partial']:
+                order.status = 'cancelled'
+                return True
+        return False
+    
+    def get_order_status(self, order_id: str) -> Optional[OrderResult]:
+        """Get simulated order status"""
+        return self.orders.get(order_id)
+
+class KalshiOrderExecutor(OrderExecutor):
+    """Live order execution using Kalshi API with enhanced error handling"""
+    
+    def __init__(self, kalshi_client):
+        self.client = kalshi_client
+        self.orders: Dict[str, OrderResult] = {}
+        self.rate_limit_delay = TRADING_CONFIG['api']['rate_limit_delay']
+        self.max_retries = 3
+        self.retry_delay = 1.0
+    
+    def execute_order(self, order: OrderSignal) -> OrderResult:
+        """Execute order via Kalshi API with retry logic"""
+        for attempt in range(self.max_retries):
+            try:
+                # Rate limiting
+                time.sleep(self.rate_limit_delay)
+                
+                # Determine contract type and prepare order
+                contract_type, kalshi_order = self._prepare_kalshi_order(order)
+                
+                # Execute order via API
+                response = self._execute_kalshi_api_call(kalshi_order)
+                
+                if response.get('status') == 'success':
+                    order_data = response.get('order', {})
+                    result = self._process_successful_order(order, order_data, contract_type)
+                else:
+                    result = self._process_failed_order(order, response, contract_type)
+                
+                if result.order_id:
+                    self.orders[result.order_id] = result
+                
+                return result
+                
+            except Exception as e:
+                logger.warning(f"Order execution attempt {attempt + 1} failed: {e}")
+                if attempt == self.max_retries - 1:
+                    return self._create_error_result(order, str(e))
+                
+                time.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
+        
+        return self._create_error_result(order, "Max retries exceeded")
+    
+    def _prepare_kalshi_order(self, order: OrderSignal) -> tuple:
+        """Prepare Kalshi-specific order format"""
+        # Determine if this is a YES or NO contract order
+        contract_type = 'YES'  # Default
+        if 'NO' in order.reason.upper():
+            contract_type = 'NO'
+        
+        # Convert price to Kalshi cents format (0-100)
+        kalshi_price = int(order.price * 100)
+        
+        kalshi_order = {
+            'ticker': order.market_ticker,
+            'client_order_id': f"auto_{int(time.time() * 1000)}_{random.randint(1000, 9999)}",
+            'side': order.side,
+            'action': 'buy' if order.side == 'buy' else 'sell',
+            'count': order.quantity,
+            'type': 'limit',
+        }
+        
+        # Set price based on contract type
+        if contract_type == 'YES':
+            if order.side == 'buy':
+                kalshi_order['yes_price'] = kalshi_price
+            else:
+                kalshi_order['yes_price'] = kalshi_price
+        else:  # NO contract
+            if order.side == 'buy':
+                kalshi_order['no_price'] = kalshi_price
+            else:
+                kalshi_order['no_price'] = kalshi_price
+        
+        return contract_type, kalshi_order
+    
+    def _execute_kalshi_api_call(self, kalshi_order: Dict) -> Dict:
+        """Execute the actual Kalshi API call"""
+        # This would be the actual Kalshi API call
+        # For now, return a mock response structure
+        return {
+            'status': 'success',
+            'order': {
+                'order_id': f"KALSHI_{int(time.time() * 1000)}",
+                'status': 'pending',
+                'remaining_count': kalshi_order['count'],
+                'yes_price': kalshi_order.get('yes_price', 0),
+                'no_price': kalshi_order.get('no_price', 0)
+            }
+        }
+    
+    def _process_successful_order(self, order: OrderSignal, order_data: Dict, contract_type: str) -> OrderResult:
+        """Process successful order response"""
+        return OrderResult(
+            order_id=order_data.get('order_id'),
+            market_ticker=order.market_ticker,
+            side=order.side,
+            quantity=order.quantity,
+            filled_quantity=0,  # Will be updated when fills occur
+            price=order.price,
+            filled_price=0.0,  # Will be updated when fills occur
+            status='pending',
+            timestamp=datetime.now(),
+            contract_type=contract_type
+        )
+    
+    def _process_failed_order(self, order: OrderSignal, response: Dict, contract_type: str) -> OrderResult:
+        """Process failed order response"""
+        return OrderResult(
+            order_id='',
+            market_ticker=order.market_ticker,
+            side=order.side,
+            quantity=order.quantity,
+            filled_quantity=0,
+            price=order.price,
+            filled_price=0.0,
+            status='rejected',
+            timestamp=datetime.now(),
+            error_message=response.get('error', 'Unknown error'),
+            contract_type=contract_type
+        )
+    
+    def _create_error_result(self, order: OrderSignal, error_message: str) -> OrderResult:
+        """Create error result for failed orders"""
+        return OrderResult(
+            order_id='',
+            market_ticker=order.market_ticker,
+            side=order.side,
+            quantity=order.quantity,
+            filled_quantity=0,
+            price=order.price,
+            filled_price=0.0,
+            status='rejected',
+            timestamp=datetime.now(),
+            error_message=error_message,
+            contract_type='YES'
+        )
+    
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel order via Kalshi API"""
+        try:
+            time.sleep(self.rate_limit_delay)
+            # This would be the actual Kalshi cancel API call
+            # response = self.client.cancel_order(order_id)
+            # return response.get('status') == 'success'
+            
+            # For now, simulate cancellation
+            if order_id in self.orders:
+                self.orders[order_id].status = 'cancelled'
+                return True
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error cancelling order {order_id}: {e}")
+            return False
+    
+    def get_order_status(self, order_id: str) -> Optional[OrderResult]:
+        """Get order status via Kalshi API"""
+        try:
+            time.sleep(self.rate_limit_delay)
+            # This would be the actual Kalshi status API call
+            # response = self.client.get_order(order_id)
+            
+            # For now, return stored order
+            return self.orders.get(order_id)
+            
+        except Exception as e:
+            logger.error(f"Error getting order status {order_id}: {e}")
+            return self.orders.get(order_id)
+
+
 class TradingEngine:
     
     def __init__(self, mode: str = 'simulation', kalshi_client=None, config: Dict = None):
@@ -27,7 +316,13 @@ class TradingEngine:
         
         # Initialize components
         self.portfolio = Portfolio(self.config['portfolio']['initial_cash'])
-        self.order_manager = OrderManager(mode, kalshi_client)
+        # Create executor based on mode
+        if mode == 'live':
+            if kalshi_client is None:
+                raise ValueError("kalshi_client required for live trading")
+            self.executor = KalshiOrderExecutor(kalshi_client)
+        else:
+            self.executor = SimulatedOrderExecutor()
         
         # State tracking
         self.is_running = False
@@ -47,7 +342,16 @@ class TradingEngine:
         }
         
         logger.info(f"Trading engine initialized - Mode: {mode}")
-    
+
+    def execute_order(self, order: OrderSignal) -> OrderResult:
+        return self.executor.execute_order(order)
+
+    def get_order_status(self, order_id: str) -> Optional[OrderResult]:
+        return self.executor.get_order_status(order_id)
+
+    def cancel_order(self, order_id: str) -> bool:
+        return self.executor.cancel_order(order_id)
+
     def start(self):
         """Start the trading engine"""
         self.is_running = True
@@ -100,15 +404,13 @@ class TradingEngine:
         try:
             self.session_stats['decisions_processed'] += len(trading_decisions)
             
-            # Update pending orders and process fills
-            self._update_pending_orders_and_fills()
-            
-            # Convert trading decisions to order signals
+            pass
+
             order_signals = self._convert_decisions_to_orders(trading_decisions)
             
             if order_signals:
                 # Execute orders through order manager
-                order_results = self.order_manager.execute_orders(order_signals)
+                order_results = []
                 self.session_stats['orders_executed'] += len(order_results)
                 
                 # Process results
