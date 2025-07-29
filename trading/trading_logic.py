@@ -1,11 +1,9 @@
-# trading_logic.py - Central decision making hub
 from typing import List, Dict, Any, Optional
 import numpy as np
 import time
 from dataclasses import dataclass
 from trading.portfolio import Portfolio
-from trading.risk_manager import RiskManager, OrderSignal
-from trading.strategy import Strategy
+
 
 @dataclass
 class TradingDecision:
@@ -22,12 +20,10 @@ class TradingDecision:
 
 class TradingLogic:
     
-    def __init__(self, strategy: Strategy, risk_manager: RiskManager, config: Dict[str, Any]):
-        self.strategy = strategy
+    def __init__(self, risk_manager: RiskManager, config: Dict[str, Any]):
         self.risk_manager = risk_manager
         self.config = config
         
-        # Trading parameters from config
         self.min_edge_threshold = config.get('min_edge_threshold', 0.05)
         self.max_spread_threshold = config.get('max_spread_threshold', 8.0)
         self.min_confidence_threshold = config.get('min_confidence_threshold', 0.6)
@@ -186,46 +182,7 @@ class TradingLogic:
         
         return max(0.01, min(0.99, prob))
     
-    def _get_strategy_signal(self, market_data: MarketDataPoint, 
-                           market_analysis: Dict[str, Any], portfolio: Portfolio) -> Dict[str, Any]:
-        """Get trading signal from strategy"""
-        
-        # Convert to strategy-compatible format
-        from strategy import MarketData as StrategyMarketData
-        strategy_data = StrategyMarketData(
-            ticker=market_data.ticker,
-            price=market_analysis['mid_price'],
-            bid=market_data.yes_bid or 0,
-            ask=market_data.yes_ask or 0,
-            volume=market_data.volume_delta or 0,
-            timestamp=market_data.timestamp or time.time()
-        )
-        
-        # Get strategy signals
-        signals = self.strategy.generate_signals([strategy_data], portfolio)
-        
-        if not signals:
-            return {'action': 'NO_TRADE', 'confidence': 0.0, 'reason': 'No strategy signal'}
-        
-        # Convert strategy signal to our format
-        signal = signals[0]  # Take first signal
-        
-        # Determine our action based on strategy signal and market analysis
-        action = self._determine_trading_action(signal, market_analysis, market_data)
-        
-        # Calculate confidence based on edge magnitude and strategy strength
-        confidence = min(1.0, abs(market_analysis['edge']) / self.min_edge_threshold)
-        confidence = max(0.0, confidence)
-        
-        return {
-            'action': action,
-            'confidence': confidence,
-            'quantity': signal.quantity,
-            'price': signal.price,
-            'reason': signal.reason
-        }
-    
-    def _determine_trading_action(self, strategy_signal: OrderSignal, 
+    def _determine_trading_action(self, 
                                 market_analysis: Dict[str, Any], 
                                 market_data: MarketDataPoint) -> str:
         """Determine specific trading action based on strategy and market analysis"""
@@ -249,48 +206,6 @@ class TradingLogic:
                 return 'SELL_YES' # BTC below strike, sell YES
         
         return 'NO_TRADE'
-    
-    def _apply_risk_management(self, strategy_signal: Dict[str, Any], 
-                              portfolio: Portfolio, market_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply risk management to strategy signal"""
-        
-        # Create order signal for risk manager
-        order_signal = OrderSignal(
-            market_ticker=market_analysis['ticker'],
-            side='buy' if 'BUY' in strategy_signal['action'] else 'sell',
-            quantity=strategy_signal['quantity'],
-            price=strategy_signal['price'],
-            reason=strategy_signal['reason']
-        )
-        
-        # Validate with risk manager
-        validated_signals = self.risk_manager.validate_orders([order_signal], portfolio)
-        
-        if not validated_signals:
-            return {
-                'approved': False,
-                'action': 'REJECTED',
-                'reason': 'Risk management rejection'
-            }
-        
-        validated_signal = validated_signals[0]
-        
-        # Position sizing based on confidence and edge
-        confidence = strategy_signal['confidence']
-        edge_magnitude = abs(market_analysis['edge'])
-        
-        # Scale position size based on confidence and edge
-        size_multiplier = confidence * min(2.0, edge_magnitude / self.min_edge_threshold)
-        adjusted_quantity = int(validated_signal.quantity * size_multiplier)
-        adjusted_quantity = max(1, min(adjusted_quantity, validated_signal.quantity))
-        
-        return {
-            'approved': True,
-            'action': strategy_signal['action'],
-            'quantity': adjusted_quantity,
-            'price': validated_signal.price,
-            'reason': f"{validated_signal.reason} (confidence: {confidence:.2f})"
-        }
     
     def evaluate_exit_signals(self, portfolio: Portfolio, current_market_data: List[MarketDataPoint]) -> List[TradingDecision]:
         """Evaluate existing positions for exit signals"""
