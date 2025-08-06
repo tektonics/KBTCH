@@ -233,7 +233,7 @@ async def start_exchange(exchange_name, symbols):
 
 
 async def example():
-    exchanges = ['gemini', 'bitstamp', 'coinbase','okx', 'kraken']
+    exchanges = ['gemini', 'bitstamp', 'coinbase','okx', 'kraken', 'cryptocom']
     symbols = ['BTC/USD']
     promises = []
     for i in range(0, len(exchanges)):
