@@ -670,13 +670,9 @@ class UnifiedCryptoManager:
             # Apply exponential weighting
             brti_value = self.apply_exponential_weighting(curves, utilized_depth)
 
-            # Get dynamic cap
-            # CHANGE: REMOVE THIS REDUNDANT CALL. dynamic_cap is already available.
-            # dynamic_cap = self.calculate_dynamic_order_size_cap(valid_order_books)
-
             brti_data = {
                 'utilized_depth': utilized_depth,
-                'dynamic_cap': dynamic_cap, # Use the already calculated dynamic_cap
+                'dynamic_cap': dynamic_cap,
                 'valid_exchanges': len(valid_order_books),
                 'total_exchanges': len(order_books),
                 'exchange_status': {ob.exchange_id: "valid" if ob.is_valid else ob.error_reason for ob in order_books}
