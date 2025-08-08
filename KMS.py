@@ -14,7 +14,7 @@ import websockets
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
-
+from event_bus import event_bus, EventTypes
 import numpy as np
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -310,6 +310,32 @@ class KalshiClient:
                 current_ticker_data.volume_delta = data["volume_delta"]
             current_ticker_data.timestamp = time.time()
 
+            # FIXED: Publish market data update event immediately after processing ticker data
+            if (current_ticker_data.yes_bid is not None and 
+                current_ticker_data.yes_ask is not None and
+                current_ticker_data.no_bid is not None and
+                current_ticker_data.no_ask is not None):
+                
+                strike_price = MarketSelector.extract_strike_price(market_ticker)
+                
+                try:
+                    event_bus.publish(
+                        EventTypes.MARKET_DATA_UPDATE,
+                        {
+                            "market_ticker": market_ticker,
+                            "yes_bid": current_ticker_data.yes_bid,
+                            "yes_ask": current_ticker_data.yes_ask, 
+                            "no_bid": current_ticker_data.no_bid,
+                            "no_ask": current_ticker_data.no_ask,
+                            "strike_price": strike_price,
+                            "timestamp": current_ticker_data.timestamp
+                        },
+                        source="kms"
+                    )
+                    logger.debug(f"Published market data update for {market_ticker}")
+                except Exception as e:
+                    logger.error(f"Failed to publish market data event: {e}")
+
         elif msg_type == "orderbook_snapshot":
             self.orderbooks[market_ticker] = {
                 "yes": data.get("yes", []),
@@ -505,7 +531,7 @@ class KalshiClient:
         await self._update_market_subscriptions_adaptive()
         if not self.active_market_info:
             logger.error("No active markets identified after initial setup. Exiting adaptive tracking.")
-            return
+           # return
 
         last_update_time = time.time()
         while not self._shutdown_requested:
@@ -513,7 +539,7 @@ class KalshiClient:
             if current_time - last_update_time >= self.update_interval:
                 await self._update_market_subscriptions_adaptive()
                 last_update_time = current_time
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(.1)
 
         logger.info("🛑 Adaptive market tracking stopped.")
         await self.close()
@@ -682,7 +708,7 @@ async def main():
             else:
                 print("No active markets currently being tracked.")
 
-            await asyncio.sleep(.1)
+            await asyncio.sleep(.05)
 
     except KeyboardInterrupt:
         logger.info("\nCtrl+C detected. Stopping adaptive market tracking and cleaning up...")

@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
+from event_bus import event_bus, EventTypes
 import logging
 import statistics
 
@@ -734,6 +735,14 @@ class UnifiedCryptoManager:
                 # Calculate BRTI
                 brti_value, brti_data = await self.calculate_brti_with_exchanges(exchanges)
                 
+               # Publish BRTI update to event bus
+                if brti_value is not None:
+                    event_bus.publish(
+                        EventTypes.PRICE_UPDATE,
+                        {"brti_price": brti_value},
+                        source="udm"
+                    )
+
                 # Display single line update
                 if brti_value is not None:
                     # Create mock order books for display formatting
