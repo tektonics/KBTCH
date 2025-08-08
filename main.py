@@ -130,25 +130,78 @@ class TradingSystemManager:
             raise
     
     def print_status(self):
-        """Print current system status"""
+        """Print current system status with Kalshi market display"""
+        # Clear screen for clean display
+        os.system('cls' if os.name == 'nt' else 'clear')
+        
         runtime = time.time() - self.stats['start_time']
         
-        print(f"\n📊 TRADING SYSTEM STATUS (Runtime: {runtime:.0f}s)")
-        print("=" * 60)
+        print(f"📊 KBTCH TRADING SYSTEM - Runtime: {runtime:.0f}s")
+        print("=" * 70)
+        
+        # System Statistics
         print(f"Price Updates (UDM):     {self.stats['price_updates']}")
         print(f"Market Data (KMS):       {self.stats['market_data_updates']}")
         print(f"Trading Signals:         {self.stats['signals_generated']}")
         
+        # Strategy Engine Status
         if self.strategy:
             status = self.strategy.get_status()
-            print(f"Current BRTI:            ${status['current_brti']:,.2f}" if status['current_brti'] else "Current BRTI:            None")
-            print(f"Active Markets:          {status['active_markets']}")
+            current_brti = status.get('current_brti')
+            if current_brti:
+                print(f"Current BRTI:            ${current_brti:,.2f}")
+            else:
+                print("Current BRTI:            Waiting for data...")
+            print(f"Active Markets:          {status.get('active_markets', 0)}")
         
-        if self.kms:
-            print(f"KMS Active:              {'✅' if not self.kms_task.done() else '❌'}")
+        # Component Status
+        kms_status = "✅ Running" if self.kms and self.kms_task and not self.kms_task.done() else "❌ Stopped"
+        udm_status = "✅ Running" if self.udm_thread and self.udm_thread.is_alive() else "❌ Stopped"
         
-        print(f"UDM Active:              {'✅' if self.udm_thread and self.udm_thread.is_alive() else '❌'}")
-        print()
+        print(f"KMS Status:              {kms_status}")
+        print(f"UDM Status:              {udm_status}")
+        
+        # Kalshi Market Display
+        if self.kms and self.kms.active_market_info:
+            print("\n" + "─" * 70)
+            
+            # Header with BTC price and volatility
+            btc_price = self.kms.last_btc_price or 0
+            volatility = self.kms.current_volatility or 0
+            event_ticker = self.kms.event_ticker or "Unknown"
+            
+            print(f"📈 KALSHI MARKETS ({event_ticker}) - BTC: ${btc_price:,.2f} | Vol: {volatility:.2f}")
+            
+            # Strike ladder
+            sorted_markets = sorted(self.kms.active_market_info.values(), key=lambda m: m.strike)
+            if sorted_markets:
+                strike_labels = []
+                for market_info in sorted_markets:
+                    label = f"${market_info.strike:,.0f}🎯" if market_info.is_primary else f"${market_info.strike:,.0f}"
+                    strike_labels.append(label)
+                print(f"Strike Ladder: {' | '.join(strike_labels)}")
+                
+                # Market details (show top 3 to keep display compact)
+                for i, market_info in enumerate(sorted_markets[:3]):
+                    data = market_info.market_data
+                    if data and data.yes_bid is not None and data.yes_ask is not None:
+                        primary_indicator = "🎯" if market_info.is_primary else " "
+                        yes_prices = f"YES: {data.yes_bid:.0f}/{data.yes_ask:.0f}"
+                        no_bid, no_ask = 100 - data.yes_ask, 100 - data.yes_bid
+                        no_prices = f"NO: {no_bid:.0f}/{no_ask:.0f}"
+                        spread = data.yes_ask - data.yes_bid
+                        spread_text = f"Spread: {spread:.0f}¢"
+                        
+                        print(f"{primary_indicator}${market_info.strike:,.0f}: {yes_prices} | {no_prices} | {spread_text}")
+                
+                # Show count if more markets exist
+                if len(sorted_markets) > 3:
+                    print(f"... and {len(sorted_markets) - 3} more markets")
+        else:
+            print(f"\n📈 KALSHI MARKETS: Waiting for market data...")
+        
+        print("=" * 70)
+        print("Press Ctrl+C to stop")
     
     async def shutdown(self):
         """Clean shutdown of all components"""
@@ -185,7 +238,7 @@ class TradingSystemManager:
             
             # Start all components
             self.start_udm()
-            await asyncio.sleep(2)  # Give UDM time to start
+            await asyncio.sleep(10)  # Give UDM time to start
             
             self.start_strategy_engine()
             await asyncio.sleep(1)  # Give strategy time to initialize
@@ -199,14 +252,14 @@ class TradingSystemManager:
             
             self.running = True
             
-            # Main monitoring loop
-            status_interval = 30  # Print status every 30 seconds
+            # Main monitoring loop with live display
+            status_interval = 2  # Update display every 2 seconds
             last_status_time = time.time()
             
             while self.running:
                 current_time = time.time()
                 
-                # Print periodic status
+                # Print live status
                 if current_time - last_status_time >= status_interval:
                     self.print_status()
                     last_status_time = current_time
@@ -216,7 +269,7 @@ class TradingSystemManager:
                     logger.error("❌ KMS task has stopped unexpectedly")
                     break
                 
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)
                 
         except KeyboardInterrupt:
             logger.info("👋 Shutdown requested by user")
