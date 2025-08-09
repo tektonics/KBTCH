@@ -310,31 +310,24 @@ class KalshiClient:
                 current_ticker_data.volume_delta = data["volume_delta"]
             current_ticker_data.timestamp = time.time()
 
-            # FIXED: Publish market data update event immediately after processing ticker data
-            if (current_ticker_data.yes_bid is not None and 
-                current_ticker_data.yes_ask is not None and
-                current_ticker_data.no_bid is not None and
-                current_ticker_data.no_ask is not None):
-                
-                strike_price = MarketSelector.extract_strike_price(market_ticker)
-                
-                try:
-                    event_bus.publish(
-                        EventTypes.MARKET_DATA_UPDATE,
-                        {
-                            "market_ticker": market_ticker,
-                            "yes_bid": current_ticker_data.yes_bid,
-                            "yes_ask": current_ticker_data.yes_ask, 
-                            "no_bid": current_ticker_data.no_bid,
-                            "no_ask": current_ticker_data.no_ask,
-                            "strike_price": strike_price,
-                            "timestamp": current_ticker_data.timestamp
-                        },
-                        source="kms"
-                    )
-                    logger.debug(f"Published market data update for {market_ticker}")
-                except Exception as e:
-                    logger.error(f"Failed to publish market data event: {e}")
+            strike_price = MarketSelector.extract_strike_price(market_ticker)
+
+            try:
+                event_bus.publish(
+                    EventTypes.MARKET_DATA_UPDATE,
+                    {
+                         "market_ticker": market_ticker,
+                         "yes_bid": current_ticker_data.yes_bid,
+                         "yes_ask": current_ticker_data.yes_ask, 
+                         "no_bid": current_ticker_data.no_bid,
+                         "no_ask": current_ticker_data.no_ask,
+                         "strike_price": strike_price,
+                         "timestamp": current_ticker_data.timestamp
+                    },
+                    source="kms"
+                )
+            except Exception as e:
+                logger.error(f"Failed to publish market data event: {e}")
 
         elif msg_type == "orderbook_snapshot":
             self.orderbooks[market_ticker] = {

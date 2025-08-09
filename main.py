@@ -1,8 +1,3 @@
-"""
-Main trading system runner - starts all components in a single process.
-This ensures UDM, KMS, and Strategy Engine can communicate via the event bus.
-"""
-
 import asyncio
 import threading
 import logging
@@ -69,9 +64,7 @@ class TradingSystemManager:
         
         def market_data_handler(event):
             self.stats['market_data_updates'] += 1
-            market_ticker = event.data.get('market_ticker')
-            if self.stats['market_data_updates'] % 10 == 0:  # Log every 10th update
-                logger.info(f"📈 Market Data Update #{self.stats['market_data_updates']}: {market_ticker}")
+            
         
         def signal_handler(event):
             self.stats['signals_generated'] += 1
@@ -89,7 +82,6 @@ class TradingSystemManager:
         logger.info("✅ Event monitoring setup complete")
     
     def start_udm(self):
-        """Start UDM in a separate thread"""
         logger.info("🚀 Starting UDM (Unified Data Manager)...")
         
         self.udm = UnifiedCryptoManager()
@@ -139,28 +131,15 @@ class TradingSystemManager:
         print(f"📊 KBTCH TRADING SYSTEM - Runtime: {runtime:.0f}s")
         print("=" * 70)
         
-        # System Statistics
-        print(f"Price Updates (UDM):     {self.stats['price_updates']}")
-        print(f"Market Data (KMS):       {self.stats['market_data_updates']}")
         print(f"Trading Signals:         {self.stats['signals_generated']}")
         
-        # Strategy Engine Status
+# Strategy Engine Status
         if self.strategy:
             status = self.strategy.get_status()
-            current_brti = status.get('current_brti')
-            if current_brti:
-                print(f"Current BRTI:            ${current_brti:,.2f}")
-            else:
-                print("Current BRTI:            Waiting for data...")
             print(f"Active Markets:          {status.get('active_markets', 0)}")
-        
-        # Component Status
-        kms_status = "✅ Running" if self.kms and self.kms_task and not self.kms_task.done() else "❌ Stopped"
-        udm_status = "✅ Running" if self.udm_thread and self.udm_thread.is_alive() else "❌ Stopped"
-        
-        print(f"KMS Status:              {kms_status}")
-        print(f"UDM Status:              {udm_status}")
-        
+            print(f"UDM Data Flow:           {status.get('udm_active', '❌')}")  # Add this
+            print(f"KMS Data Flow:           {status.get('kms_active', '❌')}")  # Add this
+
         # Kalshi Market Display
         if self.kms and self.kms.active_market_info:
             print("\n" + "─" * 70)
