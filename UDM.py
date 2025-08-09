@@ -739,9 +739,18 @@ class UnifiedCryptoManager:
                 if brti_value is not None:
                     event_bus.publish(
                         EventTypes.PRICE_UPDATE,
-                        {"brti_price": brti_value},
+                        {
+                            "brti_price": brti_value,
+                            "utilized_depth": brti_data.get('utilized_depth'),
+                            "dynamic_cap": brti_data.get('dynamic_cap'), 
+                            "valid_exchanges": brti_data.get('valid_exchanges'),
+                            "volume_spikes": ohlcv_data['volume_spikes'],
+                            "rsi": ohlcv_data['rsi'],
+                            "momentum": ohlcv_data['momentum'],
+                            "avg_price": ohlcv_data['avg_price']
+                        },
                         source="udm"
-                    )
+                )
 
                 # Display single line update
                 if brti_value is not None:

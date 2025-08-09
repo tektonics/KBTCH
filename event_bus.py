@@ -21,7 +21,6 @@ class Event:
     timestamp: float
     source: Optional[str] = None
 
-
 class EventBus:
     """Simple publish/subscribe event bus"""
     
@@ -151,3 +150,4 @@ class EventTypes:
     SYSTEM_STOP = "system_stop"
     COMPONENT_ERROR = "component_error"
     HEALTH_CHECK = "health_check"
+    ENRICHED_EVENT = "enriched_event"
