@@ -16,14 +16,38 @@ from CEP import CEPEngine
 from strategy import TradingStrategy
 from event_bus import event_bus, EventTypes
 
+os.makedirs('logs', exist_ok=True)
+
+class LogCapture(logging.Handler):
+    def __init__(self, maxlen=10):
+        super().__init__()
+        self.logs = deque(maxlen=maxlen)
+    
+    def emit(self, record):
+        log_entry = self.format(record)
+        self.logs.append({
+            'time': time.time(),
+            'level': record.levelname,
+            'message': log_entry,
+            'name': record.name
+        })
+
+log_capture = LogCapture(maxlen=8)
+log_capture.setFormatter(logging.Formatter('%(name)s - %(levelname)s - %(message)s'))
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/trading_system.log'),
+        log_capture  # Capture for dashboard display
+        # NO StreamHandler = no console interference
+    ],
+    force=True
 )
 
 logging.getLogger('websockets').setLevel(logging.WARNING)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
-
 logger = logging.getLogger(__name__)
 
 class TradingSystemManager:
@@ -35,18 +59,19 @@ class TradingSystemManager:
         self.udm_thread: Optional[threading.Thread] = None
         self.kms_task: Optional[asyncio.Task] = None
         self.running = False
-        
+
+        self.log_capture = log_capture
+
         self.stats = {
             'price_updates': 0,
             'market_data_updates': 0,
-            'enriched_events': 0,  # New: CEP events
+            'enriched_events': 0,
             'signals_generated': 0,
             'start_time': time.time(),
-            'recent_patterns': [],  # Track recent CEP patterns
-            'recent_regimes': []    # Track recent market regimes
+            'recent_patterns': [],
+            'recent_regimes': []
         }
         
-        # Set up signal handlers for clean shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
     
@@ -157,7 +182,7 @@ class TradingSystemManager:
                 asyncio.run(self.udm.run_unified_system())
             except Exception as e:
                 logger.error(f"UDM error: {e}")
-    
+
         self.udm_thread = threading.Thread(target=udm_runner, daemon=True)
         self.udm_thread.start()
 
@@ -223,12 +248,13 @@ class TradingSystemManager:
             print(f"Current Volatility:      {cep_status.get('current_volatility', 0):.4f}")
             print(f"Active Markets:          {cep_status.get('active_markets', 0)}")
             
-            # Enhanced UDM data display
             print(f"\n📊 LIVE UDM DATA")
             depth = udm_data.get('utilized_depth')
-            cap = udm_data.get('dynamic_cap') 
-            print(f"BRTI Depth:              {depth:.1f}" if depth else "BRTI Depth:              N/A")
-            if cap and cap != float('inf'):
+            cap = udm_data.get('dynamic_cap')
+            
+            print(f"BRTI Depth:              {depth:.1f}" if depth is not None and isinstance(depth, (int, float)) else "BRTI Depth:              N/A")
+            
+            if cap is not None and cap != float('inf') and isinstance(cap, (int, float)):
                 print(f"Dynamic Cap:             {cap:.1f}")
             else:
                 print(f"Dynamic Cap:             ∞")
@@ -237,14 +263,12 @@ class TradingSystemManager:
             rsi = udm_data.get('rsi')
             udm_momentum = udm_data.get('udm_momentum')
             
-            print(f"Valid Exchanges:         {valid_exchanges}" if valid_exchanges else "Valid Exchanges:         N/A")
-            print(f"RSI:                     {rsi:.0f}" if rsi else "RSI:                     N/A")
+            print(f"Valid Exchanges:         {valid_exchanges}" if valid_exchanges is not None else "Valid Exchanges:         N/A")
+            print(f"RSI:                     {rsi:.0f}" if rsi is not None and isinstance(rsi, (int, float)) else "RSI:                     N/A")
             print(f"UDM Momentum:            {udm_momentum}" if udm_momentum else "UDM Momentum:            →")
             
-            # Volume spikes with better formatting
             volume_spikes = udm_data.get('volume_spikes', [])
-            if volume_spikes:
-                # Show max 3 volume spikes to keep display clean
+            if volume_spikes and isinstance(volume_spikes, list):
                 display_spikes = volume_spikes[:3]
                 if len(volume_spikes) > 3:
                     display_spikes.append(f"+{len(volume_spikes)-3} more")
@@ -252,7 +276,7 @@ class TradingSystemManager:
             else:
                 print(f"Volume Spikes:           None")
             
-            # Recent CEP patterns detected
+
             if self.stats['recent_patterns']:
                 print(f"\n🔍 RECENT CEP PATTERNS")
                 for i, pattern_info in enumerate(self.stats['recent_patterns'][-3:]):  # Show last 3
@@ -261,6 +285,7 @@ class TradingSystemManager:
                     print(f"Pattern {i+1}:             {pattern} ({age:.0f}s ago)")
             
             # Recent regime changes
+            
             if len(self.stats['recent_regimes']) > 1:
                 print(f"\n📊 RECENT REGIME CHANGES")
                 for i, regime_info in enumerate(self.stats['recent_regimes'][-2:]):  # Show last 2
@@ -269,7 +294,7 @@ class TradingSystemManager:
                     # Truncate long regime names
                     display_regime = regime[:30] + "..." if len(regime) > 30 else regime
                     print(f"Regime {i+1}:             {display_regime} ({age:.0f}s ago)")
-        
+            
         # Strategy Status  
         if self.strategy:
             strategy_status = self.strategy.get_status()
@@ -323,7 +348,28 @@ class TradingSystemManager:
                         print(f"{primary_indicator}${market_info.strike:,.0f}: {yes_prices} | {no_prices} | {spread_text}")
         else:
             print(f"\n📈 KALSHI MARKETS: Waiting for market data...")
+
+        print(f"\n📋 RECENT SYSTEM LOGS")
+        print("-" * 50)
         
+        if self.log_capture.logs:
+            for log_entry in list(self.log_capture.logs)[-5:]:
+                age = time.time() - log_entry['time']
+                level_icon = {
+                    'INFO': 'ℹ️',
+                    'WARNING': '⚠️', 
+                    'ERROR': '❌',
+                    'CRITICAL': '🚨'
+                }.get(log_entry['level'], '•')
+                
+                message = log_entry['message']
+                if len(message) > 70:
+                    message = message[:67] + "..."
+                
+                print(f"{level_icon} {message} ({age:.0f}s ago)")
+        else:
+            print("No recent logs")
+
         print("=" * 80)
         print("Press Ctrl+C to stop")
     
@@ -364,7 +410,6 @@ class TradingSystemManager:
             while self.running:
                 current_time = time.time()
                 
-                # Print live status
                 if current_time - last_status_time >= status_interval:
                     self.print_status()
                     last_status_time = current_time
