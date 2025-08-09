@@ -5,7 +5,7 @@ import sys
 import os
 import time
 import signal
-from typing import Optional
+from typing import Optional, List
 
 # Add current directory to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -32,19 +32,21 @@ class TradingSystemManager:
     def __init__(self):
         self.udm: Optional[UnifiedCryptoManager] = None
         self.kms: Optional[KalshiClient] = None
-        self.cep_engine: Optional[CEPEngine] = None
-        self.strategy: Optional[TradingStrategy] = None
+        self.cep_engine: Optional[CEPEngine] = None  # New CEP component
+        self.strategy: Optional[TradingStrategy] = None  # Updated strategy component
         self.udm_thread: Optional[threading.Thread] = None
         self.kms_task: Optional[asyncio.Task] = None
         self.running = False
         
-        # Statistics
+        # Enhanced statistics
         self.stats = {
             'price_updates': 0,
             'market_data_updates': 0,
-            'enriched_events': 0,
+            'enriched_events': 0,  # New: CEP events
             'signals_generated': 0,
-            'start_time': time.time()
+            'start_time': time.time(),
+            'recent_patterns': [],  # Track recent CEP patterns
+            'recent_regimes': []    # Track recent market regimes
         }
         
         # Set up signal handlers for clean shutdown
@@ -52,11 +54,13 @@ class TradingSystemManager:
         signal.signal(signal.SIGTERM, self._signal_handler)
     
     def _signal_handler(self, signum, frame):
+        """Handle shutdown signals"""
         logger.info(f"Received signal {signum}. Initiating shutdown...")
         self.running = False
-
+    
     def setup_event_monitoring(self):
-
+        """Set up event monitoring for statistics and logging"""
+        
         def price_update_handler(event):
             self.stats['price_updates'] += 1
             brti_price = event.data.get('brti_price')
@@ -69,29 +73,87 @@ class TradingSystemManager:
         def enriched_event_handler(event):
             """Monitor CEP enriched events"""
             self.stats['enriched_events'] += 1
-            # Optional: Log interesting CEP events
-            if event.data.get('momentum_pattern') or event.data.get('event_type') == 'CROSS_MARKET_ANALYSIS':
-                logger.info(f"🔍 CEP Event: {event.data.get('event_type')} - "
-                           f"Pattern: {event.data.get('momentum_pattern', 'None')}, "
-                           f"Regime: {event.data.get('market_regime', 'Unknown')}")
+            # Track recent patterns and regimes
+            data = event.data
+            momentum_pattern = data.get('momentum_pattern')
+            market_regime = data.get('market_regime', 'Unknown')
+            
+            # Store recent patterns (keep last 5)
+            if momentum_pattern and momentum_pattern not in ['None', None]:
+                self.stats['recent_patterns'].append({
+                    'pattern': momentum_pattern,
+                    'time': time.time()
+                })
+                self.stats['recent_patterns'] = self.stats['recent_patterns'][-5:]
+            
+            # Store recent regimes (keep last 3 unique)
+            if market_regime and market_regime != 'Unknown':
+                if not self.stats['recent_regimes'] or self.stats['recent_regimes'][-1]['regime'] != market_regime:
+                    self.stats['recent_regimes'].append({
+                        'regime': market_regime,
+                        'time': time.time()
+                    })
+                    self.stats['recent_regimes'] = self.stats['recent_regimes'][-3:]
+            
+            # Log interesting CEP events with enhanced patterns
+            event_type = data.get('event_type')
+            if momentum_pattern or event_type == 'CROSS_MARKET_ANALYSIS':
+                # Show enhanced patterns in logs
+                context = data.get('context', {})
+                volume_pattern = context.get('volume_pattern')
+                rsi = context.get('rsi')
+                volume_spikes = context.get('volume_spikes', [])
+                
+                log_parts = [f"🔍 CEP Event: {event_type}"]
+                if momentum_pattern:
+                    log_parts.append(f"Momentum: {momentum_pattern}")
+                if volume_pattern:
+                    log_parts.append(f"Volume: {volume_pattern}")
+                if rsi:
+                    log_parts.append(f"RSI: {rsi:.0f}")
+                if volume_spikes:
+                    log_parts.append(f"Spikes: {', '.join(volume_spikes[:2])}")  # Show first 2
+                
+                logger.info(" | ".join(log_parts))
         
         def signal_handler(event):
             self.stats['signals_generated'] += 1
-            logger.info(f"🚨 TRADING SIGNAL #{self.stats['signals_generated']}:")
-            logger.info(f"    Market: {event.data.get('market_ticker')}")
-            logger.info(f"    Signal: {event.data.get('signal_type')}")
-            logger.info(f"    Confidence: {event.data.get('confidence', 0):.2f}")
-            logger.info(f"    Edge: {event.data.get('arbitrage_edge', 0):.1f}¢")
-            logger.info(f"    Regime: {event.data.get('market_regime', 'Unknown')}")
-            logger.info(f"    Reason: {event.data.get('reason')}")
+            data = event.data
+            
+            # Enhanced signal display with CEP data
+            logger.info(f"🚨 ENHANCED TRADING SIGNAL #{self.stats['signals_generated']}:")
+            logger.info(f"    Market: {data.get('market_ticker')}")
+            logger.info(f"    Signal: {data.get('signal_type')}")
+            logger.info(f"    Confidence: {data.get('confidence', 0):.2f}")
+            
+            # Show CEP enhancements
+            edge = data.get('arbitrage_edge', 0)
+            if edge:
+                logger.info(f"    Arbitrage Edge: {edge:.1f}¢")
+            
+            momentum_pattern = data.get('momentum_pattern')
+            if momentum_pattern:
+                logger.info(f"    Momentum Pattern: {momentum_pattern}")
+            
+            market_regime = data.get('market_regime', 'Unknown')
+            volatility_level = data.get('volatility_level', 'Unknown')
+            cep_boost = data.get('cep_confidence_boost', 1.0)
+            
+            logger.info(f"    Market Regime: {market_regime}")
+            logger.info(f"    Volatility: {volatility_level}")
+            logger.info(f"    CEP Boost: {cep_boost:.2f}x")
+            logger.info(f"    Reason: {data.get('reason')}")
         
         # Subscribe to events
         event_bus.subscribe(EventTypes.PRICE_UPDATE, price_update_handler)
         event_bus.subscribe(EventTypes.MARKET_DATA_UPDATE, market_data_handler)
         event_bus.subscribe(EventTypes.ENRICHED_EVENT, enriched_event_handler)  # New CEP events
         event_bus.subscribe(EventTypes.SIGNAL_GENERATED, signal_handler)
+        
+        logger.info("✅ Event monitoring setup complete")
     
     def start_udm(self):
+        logger.info("🚀 Starting UDM (Unified Data Manager)...")
         
         self.udm = UnifiedCryptoManager()
         
@@ -106,6 +168,9 @@ class TradingSystemManager:
         logger.info("✅ UDM started in background thread")
     
     async def start_kms(self):
+        """Start KMS (Kalshi Market Service)"""
+        logger.info("🚀 Starting KMS (Kalshi Market Service)...")
+        
         try:
             self.kms = KalshiClient()
             self.kms_task = asyncio.create_task(
@@ -117,6 +182,9 @@ class TradingSystemManager:
             raise
     
     def start_cep_engine(self):
+        """Start the CEP Engine"""
+        logger.info("🚀 Starting CEP Engine (Complex Event Processing)...")
+        
         try:
             self.cep_engine = CEPEngine()
             logger.info("✅ CEP Engine started successfully")
@@ -125,6 +193,9 @@ class TradingSystemManager:
             raise
     
     def start_trading_strategy(self):
+        """Start the Trading Strategy"""
+        logger.info("🚀 Starting Trading Strategy Engine...")
+        
         try:
             self.strategy = TradingStrategy()
             logger.info("✅ Trading Strategy started successfully")
@@ -139,7 +210,7 @@ class TradingSystemManager:
         
         runtime = time.time() - self.stats['start_time']
         
-        print(f"KBTCH TRADING SYSTEM - Runtime: {runtime:.0f}s")
+        print(f"📊 KBTCH TRADING SYSTEM v2.0 (CEP + Strategy) - Runtime: {runtime:.0f}s")
         print("=" * 80)
         
         # System Statistics
@@ -151,13 +222,70 @@ class TradingSystemManager:
         # CEP Engine Status
         if self.cep_engine:
             cep_status = self.cep_engine.get_status()
+            udm_data = cep_status.get('udm_data', {})
+            
             print(f"\n🔍 CEP ENGINE STATUS")
             print(f"Events Processed:        {cep_status.get('events_processed', 0)}")
             print(f"Patterns Detected:       {cep_status.get('patterns_detected', 0)}")
-            print(f"Market Regime:           {cep_status.get('market_regime', 'Unknown')}")
+            
+            # Enhanced market regime display
+            market_regime = cep_status.get('market_regime', 'Unknown')
+            if len(market_regime) > 25:  # Truncate very long regimes
+                display_regime = market_regime[:22] + "..."
+            else:
+                display_regime = market_regime
+            print(f"Market Regime:           {display_regime}")
+            
             print(f"Volatility Level:        {cep_status.get('volatility_level', 'Unknown')}")
             print(f"Current Volatility:      {cep_status.get('current_volatility', 0):.4f}")
             print(f"Active Markets:          {cep_status.get('active_markets', 0)}")
+            
+            # Enhanced UDM data display
+            print(f"\n📊 LIVE UDM DATA")
+            depth = udm_data.get('utilized_depth')
+            cap = udm_data.get('dynamic_cap') 
+            print(f"BRTI Depth:              {depth:.1f}" if depth else "BRTI Depth:              N/A")
+            if cap and cap != float('inf'):
+                print(f"Dynamic Cap:             {cap:.1f}")
+            else:
+                print(f"Dynamic Cap:             ∞")
+            
+            valid_exchanges = udm_data.get('valid_exchanges')
+            rsi = udm_data.get('rsi')
+            udm_momentum = udm_data.get('udm_momentum')
+            
+            print(f"Valid Exchanges:         {valid_exchanges}" if valid_exchanges else "Valid Exchanges:         N/A")
+            print(f"RSI:                     {rsi:.0f}" if rsi else "RSI:                     N/A")
+            print(f"UDM Momentum:            {udm_momentum}" if udm_momentum else "UDM Momentum:            →")
+            
+            # Volume spikes with better formatting
+            volume_spikes = udm_data.get('volume_spikes', [])
+            if volume_spikes:
+                # Show max 3 volume spikes to keep display clean
+                display_spikes = volume_spikes[:3]
+                if len(volume_spikes) > 3:
+                    display_spikes.append(f"+{len(volume_spikes)-3} more")
+                print(f"Volume Spikes:           {', '.join(display_spikes)}")
+            else:
+                print(f"Volume Spikes:           None")
+            
+            # Recent CEP patterns detected
+            if self.stats['recent_patterns']:
+                print(f"\n🔍 RECENT CEP PATTERNS")
+                for i, pattern_info in enumerate(self.stats['recent_patterns'][-3:]):  # Show last 3
+                    pattern = pattern_info['pattern']
+                    age = time.time() - pattern_info['time']
+                    print(f"Pattern {i+1}:             {pattern} ({age:.0f}s ago)")
+            
+            # Recent regime changes
+            if len(self.stats['recent_regimes']) > 1:
+                print(f"\n📊 RECENT REGIME CHANGES")
+                for i, regime_info in enumerate(self.stats['recent_regimes'][-2:]):  # Show last 2
+                    regime = regime_info['regime']
+                    age = time.time() - regime_info['time']
+                    # Truncate long regime names
+                    display_regime = regime[:30] + "..." if len(regime) > 30 else regime
+                    print(f"Regime {i+1}:             {display_regime} ({age:.0f}s ago)")
         
         # Strategy Status  
         if self.strategy:
@@ -169,6 +297,14 @@ class TradingSystemManager:
             signals_by_type = strategy_status.get('signals_by_type', {})
             if signals_by_type:
                 print(f"Signal Breakdown:        {', '.join([f'{k}:{v}' for k, v in signals_by_type.items()])}")
+            
+            # Show recent signal timing
+            last_signals = strategy_status.get('last_signal_times', {})
+            if last_signals:
+                recent_signals = [(market, last_time) for market, last_time in last_signals.items() 
+                                if time.time() - last_time < 300]  # Last 5 minutes
+                if recent_signals:
+                    print(f"Recent Signals:          {len(recent_signals)} in last 5min")
         
         # Data Flow Status
         print(f"\n📡 DATA FLOW STATUS")
@@ -201,7 +337,7 @@ class TradingSystemManager:
                     strike_labels.append(label)
                 print(f"Strike Ladder: {' | '.join(strike_labels)}")
                 
-                # Market details
+                # Market details (show all markets)
                 for i, market_info in enumerate(sorted_markets):
                     data = market_info.market_data
                     if data and data.yes_bid is not None and data.yes_ask is not None:
@@ -217,6 +353,7 @@ class TradingSystemManager:
             print(f"\n📈 KALSHI MARKETS: Waiting for market data...")
         
         print("=" * 80)
+        print("📚 Architecture: UDM → CEP Engine → Strategy Engine → Signals")
         print("Press Ctrl+C to stop")
     
     async def shutdown(self):
@@ -247,7 +384,10 @@ class TradingSystemManager:
         logger.info("✅ Trading system shutdown complete")
     
     async def run(self):
+        """Main run loop"""
         try:
+            logger.info("🎯 KBTCH Trading System v2.0 Starting...")
+            logger.info("📚 Architecture: Market Data → CEP → Strategy → Signals")
             logger.info("=" * 70)
             
             # Set up event monitoring
@@ -267,12 +407,13 @@ class TradingSystemManager:
             await asyncio.sleep(2)  # Give KMS time to connect
             
             logger.info("🎉 All components started successfully!")
+            logger.info("📊 System is now running with CEP + Strategy architecture")
             logger.info("=" * 70)
             
             self.running = True
             
             # Main monitoring loop with live display
-            status_interval = .1
+            status_interval = 2  # Update display every 2 seconds
             last_status_time = time.time()
             
             while self.running:
@@ -297,9 +438,9 @@ class TradingSystemManager:
         finally:
             await self.shutdown()
             
-            # Final status
+            # Final status with enhanced stats
             print("\n" + "=" * 70)
-            print("FINAL STATISTICS")
+            print("FINAL STATISTICS - CEP + STRATEGY ARCHITECTURE")
             print("=" * 70)
             runtime = time.time() - self.stats['start_time']
             print(f"Total Runtime:           {runtime:.1f} seconds")
@@ -307,6 +448,8 @@ class TradingSystemManager:
             print(f"Market Data Updates:     {self.stats['market_data_updates']}")
             print(f"CEP Enriched Events:     {self.stats['enriched_events']}")
             print(f"Trading Signals:         {self.stats['signals_generated']}")
+            print(f"Patterns Detected:       {len(self.stats['recent_patterns'])}")
+            print(f"Regime Changes:          {len(self.stats['recent_regimes'])}")
             
             if self.stats['price_updates'] > 0:
                 rate = self.stats['price_updates'] / runtime
@@ -315,8 +458,14 @@ class TradingSystemManager:
             if self.stats['enriched_events'] > 0:
                 enrichment_rate = self.stats['enriched_events'] / max(self.stats['price_updates'] + self.stats['market_data_updates'], 1)
                 print(f"CEP Enrichment Rate:     {enrichment_rate:.2f}")
+                
+            # Show final patterns detected
+            if self.stats['recent_patterns']:
+                final_patterns = [p['pattern'] for p in self.stats['recent_patterns']]
+                print(f"Final Patterns:          {', '.join(final_patterns[-3:])}")  # Last 3
 
 async def main():
+    """Entry point"""
     manager = TradingSystemManager()
     await manager.run()
 
