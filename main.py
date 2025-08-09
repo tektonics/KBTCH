@@ -6,23 +6,21 @@ import os
 import time
 import signal
 from typing import Optional, List
+from collections import deque
 
-# Add current directory to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from UDM import UnifiedCryptoManager
 from KMS import KalshiClient
-from CEP import CEPEngine  # New CEP engine
-from strategy import TradingStrategy  # New pure strategy engine
+from CEP import CEPEngine
+from strategy import TradingStrategy
 from event_bus import event_bus, EventTypes
 
-# Set up clean logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-# Quiet the noisy loggers
 logging.getLogger('websockets').setLevel(logging.WARNING)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
@@ -32,13 +30,12 @@ class TradingSystemManager:
     def __init__(self):
         self.udm: Optional[UnifiedCryptoManager] = None
         self.kms: Optional[KalshiClient] = None
-        self.cep_engine: Optional[CEPEngine] = None  # New CEP component
-        self.strategy: Optional[TradingStrategy] = None  # Updated strategy component
+        self.cep_engine: Optional[CEPEngine] = None
+        self.strategy: Optional[TradingStrategy] = None
         self.udm_thread: Optional[threading.Thread] = None
         self.kms_task: Optional[asyncio.Task] = None
         self.running = False
         
-        # Enhanced statistics
         self.stats = {
             'price_updates': 0,
             'market_data_updates': 0,
@@ -59,7 +56,6 @@ class TradingSystemManager:
         self.running = False
     
     def setup_event_monitoring(self):
-        """Set up event monitoring for statistics and logging"""
         
         def price_update_handler(event):
             self.stats['price_updates'] += 1
@@ -144,33 +140,28 @@ class TradingSystemManager:
             logger.info(f"    CEP Boost: {cep_boost:.2f}x")
             logger.info(f"    Reason: {data.get('reason')}")
         
-        # Subscribe to events
         event_bus.subscribe(EventTypes.PRICE_UPDATE, price_update_handler)
         event_bus.subscribe(EventTypes.MARKET_DATA_UPDATE, market_data_handler)
-        event_bus.subscribe(EventTypes.ENRICHED_EVENT, enriched_event_handler)  # New CEP events
+        event_bus.subscribe(EventTypes.ENRICHED_EVENT, enriched_event_handler)
         event_bus.subscribe(EventTypes.SIGNAL_GENERATED, signal_handler)
-        
-        logger.info("✅ Event monitoring setup complete")
-    
+
     def start_udm(self):
-        logger.info("🚀 Starting UDM (Unified Data Manager)...")
-        
         self.udm = UnifiedCryptoManager()
-        
+    
+        self.udm.update_single_line_display = lambda x: None
+        self.udm.print_new_line = lambda x: None
+        self.udm.clear_display = lambda: None
+    
         def udm_runner():
             try:
                 asyncio.run(self.udm.run_unified_system())
             except Exception as e:
                 logger.error(f"UDM error: {e}")
-        
+    
         self.udm_thread = threading.Thread(target=udm_runner, daemon=True)
         self.udm_thread.start()
-        logger.info("✅ UDM started in background thread")
-    
+
     async def start_kms(self):
-        """Start KMS (Kalshi Market Service)"""
-        logger.info("🚀 Starting KMS (Kalshi Market Service)...")
-        
         try:
             self.kms = KalshiClient()
             self.kms_task = asyncio.create_task(
@@ -182,9 +173,6 @@ class TradingSystemManager:
             raise
     
     def start_cep_engine(self):
-        """Start the CEP Engine"""
-        logger.info("🚀 Starting CEP Engine (Complex Event Processing)...")
-        
         try:
             self.cep_engine = CEPEngine()
             logger.info("✅ CEP Engine started successfully")
@@ -193,9 +181,6 @@ class TradingSystemManager:
             raise
     
     def start_trading_strategy(self):
-        """Start the Trading Strategy"""
-        logger.info("🚀 Starting Trading Strategy Engine...")
-        
         try:
             self.strategy = TradingStrategy()
             logger.info("✅ Trading Strategy started successfully")
@@ -204,19 +189,17 @@ class TradingSystemManager:
             raise
     
     def print_status(self):
-        """Print current system status"""
-        # Clear screen for clean display
         os.system('cls' if os.name == 'nt' else 'clear')
         
         runtime = time.time() - self.stats['start_time']
         
-        print(f"📊 KBTCH TRADING SYSTEM v2.0 (CEP + Strategy) - Runtime: {runtime:.0f}s")
+        print(f"KBTCH TRADING SYSTEM - Runtime: {runtime:.0f}s")
         print("=" * 80)
         
         # System Statistics
         print(f"Price Updates:           {self.stats['price_updates']}")
         print(f"Market Data Updates:     {self.stats['market_data_updates']}")
-        print(f"CEP Enriched Events:     {self.stats['enriched_events']}")  # New
+        print(f"CEP Enriched Events:     {self.stats['enriched_events']}")
         print(f"Trading Signals:         {self.stats['signals_generated']}")
         
         # CEP Engine Status
@@ -305,18 +288,7 @@ class TradingSystemManager:
                                 if time.time() - last_time < 300]  # Last 5 minutes
                 if recent_signals:
                     print(f"Recent Signals:          {len(recent_signals)} in last 5min")
-        
-        # Data Flow Status
-        print(f"\n📡 DATA FLOW STATUS")
-        # Approximate data flow health based on recent activity
-        udm_active = self.stats['price_updates'] > 0 and (time.time() - self.stats['start_time']) > 10
-        kms_active = self.stats['market_data_updates'] > 0 and (time.time() - self.stats['start_time']) > 10
-        cep_active = self.stats['enriched_events'] > 0 and (time.time() - self.stats['start_time']) > 10
-        
-        print(f"UDM → CEP:               {'✅' if udm_active else '❌'}")
-        print(f"KMS → CEP:               {'✅' if kms_active else '❌'}")
-        print(f"CEP → Strategy:          {'✅' if cep_active else '❌'}")
-        
+
         # Kalshi Market Display
         if self.kms and self.kms.active_market_info:
             print(f"\n📈 KALSHI MARKETS")
@@ -353,14 +325,9 @@ class TradingSystemManager:
             print(f"\n📈 KALSHI MARKETS: Waiting for market data...")
         
         print("=" * 80)
-        print("📚 Architecture: UDM → CEP Engine → Strategy Engine → Signals")
         print("Press Ctrl+C to stop")
     
     async def shutdown(self):
-        """Clean shutdown of all components"""
-        logger.info("🛑 Shutting down trading system...")
-        
-        # Stop KMS
         if self.kms:
             try:
                 self.kms.stop_adaptive_market_tracking()
@@ -371,49 +338,27 @@ class TradingSystemManager:
                     except asyncio.CancelledError:
                         pass
                 await self.kms.close()
-                logger.info("✅ KMS shutdown complete")
             except Exception as e:
                 logger.error(f"Error shutting down KMS: {e}")
-        
-        # CEP and Strategy engines will stop when event bus stops receiving events
-        logger.info("✅ CEP and Strategy engines will stop with event flow")
-        
-        # UDM will stop when the main process exits (daemon thread)
-        logger.info("✅ UDM will stop with main process")
-        
-        logger.info("✅ Trading system shutdown complete")
-    
     async def run(self):
-        """Main run loop"""
         try:
-            logger.info("🎯 KBTCH Trading System v2.0 Starting...")
-            logger.info("📚 Architecture: Market Data → CEP → Strategy → Signals")
-            logger.info("=" * 70)
-            
-            # Set up event monitoring
             self.setup_event_monitoring()
             
-            # Start all components in order
             self.start_udm()
-            await asyncio.sleep(10)  # Give UDM time to start
+            await asyncio.sleep(10)
             
-            self.start_cep_engine()  # Start CEP first
-            await asyncio.sleep(2)   # Give CEP time to subscribe
+            self.start_cep_engine()
+            await asyncio.sleep(2)
             
-            self.start_trading_strategy()  # Then start strategy
-            await asyncio.sleep(2)   # Give strategy time to subscribe
+            self.start_trading_strategy()
+            await asyncio.sleep(2)
             
             await self.start_kms()
-            await asyncio.sleep(2)  # Give KMS time to connect
-            
-            logger.info("🎉 All components started successfully!")
-            logger.info("📊 System is now running with CEP + Strategy architecture")
-            logger.info("=" * 70)
+            await asyncio.sleep(2)
             
             self.running = True
             
-            # Main monitoring loop with live display
-            status_interval = 2  # Update display every 2 seconds
+            status_interval = .1
             last_status_time = time.time()
             
             while self.running:
@@ -424,23 +369,20 @@ class TradingSystemManager:
                     self.print_status()
                     last_status_time = current_time
                 
-                # Check if KMS is still running
+                
                 if self.kms_task and self.kms_task.done():
                     logger.error("❌ KMS task has stopped unexpectedly")
                     break
                 
                 await asyncio.sleep(0.1)
                 
-        except KeyboardInterrupt:
-            logger.info("👋 Shutdown requested by user")
         except Exception as e:
             logger.error(f"💥 Unexpected error in main loop: {e}")
         finally:
             await self.shutdown()
             
-            # Final status with enhanced stats
             print("\n" + "=" * 70)
-            print("FINAL STATISTICS - CEP + STRATEGY ARCHITECTURE")
+            print("FINAL STATS")
             print("=" * 70)
             runtime = time.time() - self.stats['start_time']
             print(f"Total Runtime:           {runtime:.1f} seconds")
@@ -459,21 +401,17 @@ class TradingSystemManager:
                 enrichment_rate = self.stats['enriched_events'] / max(self.stats['price_updates'] + self.stats['market_data_updates'], 1)
                 print(f"CEP Enrichment Rate:     {enrichment_rate:.2f}")
                 
-            # Show final patterns detected
             if self.stats['recent_patterns']:
                 final_patterns = [p['pattern'] for p in self.stats['recent_patterns']]
                 print(f"Final Patterns:          {', '.join(final_patterns[-3:])}")  # Last 3
 
 async def main():
-    """Entry point"""
     manager = TradingSystemManager()
     await manager.run()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Trading system terminated by user")
     except Exception as e:
         print(f"\n💥 Startup error: {e}")
         sys.exit(1)
