@@ -74,7 +74,8 @@ class TradingSystemManager:
         
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-    
+        self._last_line_count = 0
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""
         logger.info(f"Received signal {signum}. Initiating shutdown...")
@@ -213,28 +214,38 @@ class TradingSystemManager:
             logger.error(f"Failed to start Trading Strategy: {e}")
             raise
     
-    def print_status(self):
+    def _smooth_clear_and_print(self, content: str):
+        
+        import os
+        
+        # Clear the screen completely
         os.system('cls' if os.name == 'nt' else 'clear')
         
+        # Print all content at once  
+        print(content, end='')
+        sys.stdout.flush()
+    
+    def print_status(self):
+        lines = []
         runtime = time.time() - self.stats['start_time']
         
-        print(f"KBTCH TRADING SYSTEM - Runtime: {runtime:.0f}s")
-        print("=" * 80)
+        lines.append(f"KBTCH TRADING SYSTEM - Runtime: {runtime:.0f}s")
+        lines.append("=" * 80)
         
         # System Statistics
-        print(f"Price Updates:           {self.stats['price_updates']}")
-        print(f"Market Data Updates:     {self.stats['market_data_updates']}")
-        print(f"CEP Enriched Events:     {self.stats['enriched_events']}")
-        print(f"Trading Signals:         {self.stats['signals_generated']}")
+        lines.append(f"Price Updates:           {self.stats['price_updates']}")
+        lines.append(f"Market Data Updates:     {self.stats['market_data_updates']}")
+        lines.append(f"CEP Enriched Events:     {self.stats['enriched_events']}")
+        lines.append(f"Trading Signals:         {self.stats['signals_generated']}")
         
         # CEP Engine Status
         if self.cep_engine:
             cep_status = self.cep_engine.get_status()
             udm_data = cep_status.get('udm_data', {})
             
-            print(f"\n🔍 CEP ENGINE STATUS")
-            print(f"Events Processed:        {cep_status.get('events_processed', 0)}")
-            print(f"Patterns Detected:       {cep_status.get('patterns_detected', 0)}")
+            lines.append(f"\n🔍 CEP ENGINE STATUS")
+            lines.append(f"Events Processed:        {cep_status.get('events_processed', 0)}")
+            lines.append(f"Patterns Detected:       {cep_status.get('patterns_detected', 0)}")
             
             # Enhanced market regime display
             market_regime = cep_status.get('market_regime', 'Unknown')
@@ -242,69 +253,67 @@ class TradingSystemManager:
                 display_regime = market_regime[:22] + "..."
             else:
                 display_regime = market_regime
-            print(f"Market Regime:           {display_regime}")
+            lines.append(f"Market Regime:           {display_regime}")
             
-            print(f"Volatility Level:        {cep_status.get('volatility_level', 'Unknown')}")
-            print(f"Current Volatility:      {cep_status.get('current_volatility', 0):.4f}")
-            print(f"Active Markets:          {cep_status.get('active_markets', 0)}")
+            lines.append(f"Volatility Level:        {cep_status.get('volatility_level', 'Unknown')}")
+            lines.append(f"Current Volatility:      {cep_status.get('current_volatility', 0):.4f}")
+            lines.append(f"Active Markets:          {cep_status.get('active_markets', 0)}")
             
-            print(f"\n📊 LIVE UDM DATA")
+            lines.append(f"\n📊 LIVE UDM DATA")
             depth = udm_data.get('utilized_depth')
             cap = udm_data.get('dynamic_cap')
             
-            print(f"BRTI Depth:              {depth:.1f}" if depth is not None and isinstance(depth, (int, float)) else "BRTI Depth:              N/A")
+            lines.append(f"BRTI Depth:              {depth:.1f}" if depth is not None and isinstance(depth, (int, float)) else "BRTI Depth:              N/A")
             
             if cap is not None and cap != float('inf') and isinstance(cap, (int, float)):
-                print(f"Dynamic Cap:             {cap:.1f}")
+                lines.append(f"Dynamic Cap:             {cap:.1f}")
             else:
-                print(f"Dynamic Cap:             ∞")
+                lines.append(f"Dynamic Cap:             ∞")
             
             valid_exchanges = udm_data.get('valid_exchanges')
             rsi = udm_data.get('rsi')
             udm_momentum = udm_data.get('udm_momentum')
             
-            print(f"Valid Exchanges:         {valid_exchanges}" if valid_exchanges is not None else "Valid Exchanges:         N/A")
-            print(f"RSI:                     {rsi:.0f}" if rsi is not None and isinstance(rsi, (int, float)) else "RSI:                     N/A")
-            print(f"UDM Momentum:            {udm_momentum}" if udm_momentum else "UDM Momentum:            →")
+            lines.append(f"Valid Exchanges:         {valid_exchanges}" if valid_exchanges is not None else "Valid Exchanges:         N/A")
+            lines.append(f"RSI:                     {rsi:.0f}" if rsi is not None and isinstance(rsi, (int, float)) else "RSI:                     N/A")
+            lines.append(f"UDM Momentum:            {udm_momentum}" if udm_momentum else "UDM Momentum:            →")
             
             volume_spikes = udm_data.get('volume_spikes', [])
             if volume_spikes and isinstance(volume_spikes, list):
                 display_spikes = volume_spikes[:3]
                 if len(volume_spikes) > 3:
                     display_spikes.append(f"+{len(volume_spikes)-3} more")
-                print(f"Volume Spikes:           {', '.join(display_spikes)}")
+                lines.append(f"Volume Spikes:           {', '.join(display_spikes)}")
             else:
-                print(f"Volume Spikes:           None")
-            
+                lines.append(f"Volume Spikes:           None")
 
             if self.stats['recent_patterns']:
-                print(f"\n🔍 RECENT CEP PATTERNS")
+                lines.append(f"\n🔍 RECENT CEP PATTERNS")
                 for i, pattern_info in enumerate(self.stats['recent_patterns'][-3:]):  # Show last 3
                     pattern = pattern_info['pattern']
                     age = time.time() - pattern_info['time']
-                    print(f"Pattern {i+1}:             {pattern} ({age:.0f}s ago)")
+                    lines.append(f"Pattern {i+1}:             {pattern} ({age:.0f}s ago)")
             
             # Recent regime changes
-            
             if len(self.stats['recent_regimes']) > 1:
-                print(f"\n📊 RECENT REGIME CHANGES")
+                lines.append(f"\n📊 RECENT REGIME CHANGES")
                 for i, regime_info in enumerate(self.stats['recent_regimes'][-2:]):  # Show last 2
                     regime = regime_info['regime']
                     age = time.time() - regime_info['time']
                     # Truncate long regime names
                     display_regime = regime[:30] + "..." if len(regime) > 30 else regime
-                    print(f"Regime {i+1}:             {display_regime} ({age:.0f}s ago)")
+                    lines.append(f"Regime {i+1}:             {display_regime} ({age:.0f}s ago)")
             
         # Strategy Status  
         if self.strategy:
             strategy_status = self.strategy.get_status()
-            print(f"\n🎯 STRATEGY ENGINE STATUS")
-            print(f"Active Opportunities:    {strategy_status.get('active_opportunities', 0)}")
-            print(f"Opportunities Analyzed:  {strategy_status.get('opportunities_analyzed', 0)}")
-            print(f"Signals Generated:       {strategy_status.get('signals_generated', 0)}")
+            lines.append(f"\n🎯 STRATEGY ENGINE STATUS")
+            lines.append(f"Active Opportunities:    {strategy_status.get('active_opportunities', 0)}")
+            lines.append(f"Opportunities Analyzed:  {strategy_status.get('opportunities_analyzed', 0)}")
+            lines.append(f"Signals Generated:       {strategy_status.get('signals_generated', 0)}")
             signals_by_type = strategy_status.get('signals_by_type', {})
             if signals_by_type:
-                print(f"Signal Breakdown:        {', '.join([f'{k}:{v}' for k, v in signals_by_type.items()])}")
+                lines.append(f"Signal Breakdown:        {', '.join([f'{k}:{v}' for k, v in signals_by_type.items()])}")
             
             # Show recent signal timing
             last_signals = strategy_status.get('last_signal_times', {})
@@ -312,18 +321,18 @@ class TradingSystemManager:
                 recent_signals = [(market, last_time) for market, last_time in last_signals.items() 
                                 if time.time() - last_time < 300]  # Last 5 minutes
                 if recent_signals:
-                    print(f"Recent Signals:          {len(recent_signals)} in last 5min")
+                    lines.append(f"Recent Signals:          {len(recent_signals)} in last 5min")
 
         # Kalshi Market Display
         if self.kms and self.kms.active_market_info:
-            print(f"\n📈 KALSHI MARKETS")
+            lines.append(f"\n📈 KALSHI MARKETS")
             
             # Header with BTC price and volatility
             btc_price = self.kms.last_btc_price or 0
             volatility = self.kms.current_volatility or 0
             event_ticker = self.kms.event_ticker or "Unknown"
             
-            print(f"Event: {event_ticker} | BTC: ${btc_price:,.2f} | KMS Vol: {volatility:.2f}")
+            lines.append(f"Event: {event_ticker} | BTC: ${btc_price:,.2f} | KMS Vol: {volatility:.2f}")
             
             # Show market ladder
             sorted_markets = sorted(self.kms.active_market_info.values(), key=lambda m: m.strike)
@@ -332,7 +341,7 @@ class TradingSystemManager:
                 for market_info in sorted_markets:
                     label = f"${market_info.strike:,.0f}🎯" if market_info.is_primary else f"${market_info.strike:,.0f}"
                     strike_labels.append(label)
-                print(f"Strike Ladder: {' | '.join(strike_labels)}")
+                lines.append(f"Strike Ladder: {' | '.join(strike_labels)}")
                 
                 # Market details (show all markets)
                 for i, market_info in enumerate(sorted_markets):
@@ -345,12 +354,12 @@ class TradingSystemManager:
                         spread = data.yes_ask - data.yes_bid
                         spread_text = f"Spread: {spread:.0f}¢"
                         
-                        print(f"{primary_indicator}${market_info.strike:,.0f}: {yes_prices} | {no_prices} | {spread_text}")
+                        lines.append(f"{primary_indicator}${market_info.strike:,.0f}: {yes_prices} | {no_prices} | {spread_text}")
         else:
-            print(f"\n📈 KALSHI MARKETS: Waiting for market data...")
+            lines.append(f"\n📈 KALSHI MARKETS: Waiting for market data...")
 
-        print(f"\n📋 RECENT SYSTEM LOGS")
-        print("-" * 50)
+        lines.append(f"\n📋 RECENT SYSTEM LOGS")
+        lines.append("-" * 50)
         
         if self.log_capture.logs:
             for log_entry in list(self.log_capture.logs)[-5:]:
@@ -366,13 +375,16 @@ class TradingSystemManager:
                 if len(message) > 70:
                     message = message[:67] + "..."
                 
-                print(f"{level_icon} {message} ({age:.0f}s ago)")
+                lines.append(f"{level_icon} {message} ({age:.0f}s ago)")
         else:
-            print("No recent logs")
+            lines.append("No recent logs")
 
-        print("=" * 80)
-        print("Press Ctrl+C to stop")
-    
+        lines.append("=" * 80)
+        lines.append("Press Ctrl+C to stop")
+        
+        # NOW: Print everything at once with smooth cursor positioning
+        self._smooth_clear_and_print('\n'.join(lines))
+
     async def shutdown(self):
         if self.kms:
             try:
@@ -386,6 +398,7 @@ class TradingSystemManager:
                 await self.kms.close()
             except Exception as e:
                 logger.error(f"Error shutting down KMS: {e}")
+    
     async def run(self):
         try:
             self.setup_event_monitoring()
@@ -404,7 +417,7 @@ class TradingSystemManager:
             
             self.running = True
             
-            status_interval = .1
+            status_interval = 1.0
             last_status_time = time.time()
             
             while self.running:
@@ -414,18 +427,17 @@ class TradingSystemManager:
                     self.print_status()
                     last_status_time = current_time
                 
-                
                 if self.kms_task and self.kms_task.done():
                     logger.error("❌ KMS task has stopped unexpectedly")
                     break
                 
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.2)
                 
         except Exception as e:
             logger.error(f"💥 Unexpected error in main loop: {e}")
         finally:
             await self.shutdown()
-            
+
             print("\n" + "=" * 70)
             print("FINAL STATS")
             print("=" * 70)
