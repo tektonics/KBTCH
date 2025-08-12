@@ -272,19 +272,26 @@ class TradingStrategy:
             base_threshold *= 0.95  # Slightly lower during trends
         
         return min(base_threshold, 0.8)  # Cap at 0.8
-    
+
+    def _calculate_position_size(self, signal_data: Dict[str, Any]) -> int:
+        confidence = signal_data.get('confidence', 0)
+        arbitrage_edge = signal_data.get('arbitrage_edge', 0)
+        base_size = 1
+        confidence_multiplier = confidence * 2
+        edge_multiplier = min(arbitrage_edge / 10, 2.0)
+        final_size = int(base_size * confidence_multiplier * edge_multiplier)
+        return max(1, min(final_size, 5))  # Between 1-5 contracts
+
     def _generate_signal(self, market_ticker: str, distance_from_strike: float, 
                         confidence: float, strike_price: float,
                         yes_bid: float, yes_ask: float, no_bid: float, no_ask: float,
                         momentum_pattern: Optional[str], market_regime: str,
                         volatility_level: str, cep_confidence_boost: float) -> Optional[TradingSignal]:
-        """Generate appropriate trading signal"""
-        
+
         signal = None
         arbitrage_edge = None
         
-        if distance_from_strike > 0:  # BRTI above strike
-            # YES should be worth close to 100¢
+        if distance_from_strike > 0:
             if yes_ask < 90:
                 arbitrage_edge = 100 - yes_ask
                 if arbitrage_edge >= self.min_arbitrage_edge:
@@ -370,7 +377,6 @@ class TradingStrategy:
         return signal
     
     def _process_arbitrage_opportunity(self, opportunity: Dict[str, Any], context_data: Dict[str, Any]) -> None:
-        """Process high-confidence arbitrage opportunities from cross-market analysis"""
         market_ticker = opportunity.get("market")
         signal_type = opportunity.get("type")
         edge = opportunity.get("edge")
@@ -378,6 +384,14 @@ class TradingStrategy:
         
         if not all([market_ticker, signal_type, edge, strike]):
             return
+
+        market_opportunity = self.active_opportunities.get(market_ticker)
+        if market_opportunity:
+            yes_price = market_opportunity.get("yes_ask", 0)
+            no_price = market_opportunity.get("no_ask", 0)
+        else:
+            yes_price = 0
+            no_price = 0
         
         # Create high-confidence arbitrage signal
         arbitrage_signal = TradingSignal(
@@ -386,8 +400,8 @@ class TradingStrategy:
             confidence=min(edge / 10.0, 1.0),  # Scale edge to confidence (10 cent = 1.0)
             strike_price=strike,
             current_brti=self.current_brti or 0,
-            market_yes_price=0,  # Will be filled from market data
-            market_no_price=0,   # Will be filled from market data
+            market_yes_price=yes_price,
+            market_no_price=no_price,
             reason=f"Cross-market arbitrage: {signal_type} with {edge:.1f}¢ edge",
             timestamp=time.time(),
             market_regime=context_data.get("market_regime", "NORMAL"),
@@ -416,12 +430,18 @@ class TradingStrategy:
             self.signal_frequency_limits[market_ticker] = base_limit * self.regime_multipliers.get(market_regime, 1.0)
     
     def _publish_trading_signal(self, signal: TradingSignal) -> None:
-        """Publish trading signal to event bus"""
         try:
+            signal_data_for_sizing = {
+                "confidence": signal.confidence,
+                "arbitrage_edge": signal.arbitrage_edge
+            }
+            quantity = self._calculate_position_size(signal_data_for_sizing)
+        
             event_data = {
                 "market_ticker": signal.market_ticker,
                 "signal_type": signal.signal_type,
                 "confidence": signal.confidence,
+                "quantity": quantity,
                 "strike_price": signal.strike_price,
                 "current_brti": signal.current_brti,
                 "market_yes_price": signal.market_yes_price,

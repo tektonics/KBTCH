@@ -57,6 +57,7 @@ class TradingSystemManager:
         self.udm_thread: Optional[threading.Thread] = None
         self.kms_task: Optional[asyncio.Task] = None
         self.portfolio_manager: Optional[PortfolioManager] = None
+        self.risk_manager: Optional[RiskManager] = None
         self.running = False
 
         self.log_capture = log_capture
@@ -66,6 +67,8 @@ class TradingSystemManager:
             'market_data_updates': 0,
             'enriched_events': 0,
             'signals_generated': 0,
+            'risk_approvals': 0,
+            'risk_rejections': 0,
             'start_time': time.time(),
             'recent_patterns': [],
             'recent_regimes': []
@@ -76,7 +79,6 @@ class TradingSystemManager:
         self._last_line_count = 0
 
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals"""
         logger.info(f"Received signal {signum}. Initiating shutdown...")
         self.running = False
     
@@ -92,9 +94,7 @@ class TradingSystemManager:
             self.stats['market_data_updates'] += 1
         
         def enriched_event_handler(event):
-            """Monitor CEP enriched events"""
             self.stats['enriched_events'] += 1
-            # Track recent patterns and regimes
             data = event.data
             momentum_pattern = data.get('momentum_pattern')
             market_regime = data.get('market_regime', 'Unknown')
@@ -145,6 +145,16 @@ class TradingSystemManager:
             logger.info(f"🚨 ENHANCED TRADING SIGNAL #{self.stats['signals_generated']}:")
             logger.info(f"    Market: {data.get('market_ticker')}")
             logger.info(f"    Signal: {data.get('signal_type')}")
+            logger.info(f"    Quantity: {data.get('quantity', 1)} contracts")
+           
+            signal_type = data.get('signal_type')
+            if 'YES' in signal_type:
+                price = data.get('market_yes_price', 0)
+                logger.info(f"    YES Price: {price}¢")
+            else:
+                price = data.get('market_no_price', 0)
+                logger.info(f"    NO Price: {price}¢")
+
             logger.info(f"    Confidence: {data.get('confidence', 0):.2f}")
             
             # Show CEP enhancements
@@ -169,6 +179,29 @@ class TradingSystemManager:
         event_bus.subscribe(EventTypes.MARKET_DATA_UPDATE, market_data_handler)
         event_bus.subscribe(EventTypes.ENRICHED_EVENT, enriched_event_handler)
         event_bus.subscribe(EventTypes.SIGNAL_GENERATED, signal_handler)
+
+    def start_risk_manager(self):
+        try:
+            from risk import RiskManager
+            self.risk_manager = RiskManager(self.portfolio_manager)
+            logger.info("✅ Risk Manager started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start Risk Manager: {e}")
+            raise
+
+        def risk_approved_handler(event):
+            self.stats['risk_approvals'] += 1
+            data = event.data
+            logger.info(f"🟢 RISK APPROVED: {data.get('signal_type')} {data.get('market_ticker')}")
+    
+        def risk_rejected_handler(event):
+            self.stats['risk_rejections'] += 1
+            data = event.data
+            risk_reason = data.get('risk_reason', 'Unknown')
+            logger.warning(f"🔴 RISK REJECTED: {data.get('signal_type')} {data.get('market_ticker')} - {risk_reason}")
+    
+        event_bus.subscribe(EventTypes.RISK_APPROVED, risk_approved_handler)
+        event_bus.subscribe(EventTypes.RISK_REJECTED, risk_rejected_handler)
 
     def start_udm(self):
         self.udm = UnifiedCryptoManager()
@@ -312,6 +345,8 @@ class TradingSystemManager:
             lines.append(f"Active Opportunities:    {strategy_status.get('active_opportunities', 0)}")
             lines.append(f"Opportunities Analyzed:  {strategy_status.get('opportunities_analyzed', 0)}")
             lines.append(f"Signals Generated:       {strategy_status.get('signals_generated', 0)}")
+            lines.append(f"Risk Approvals:          {self.stats['risk_approvals']}")
+            lines.append(f"Risk Rejections:         {self.stats['risk_rejections']}")
             signals_by_type = strategy_status.get('signals_by_type', {})
             if signals_by_type:
                 lines.append(f"Signal Breakdown:        {', '.join([f'{k}:{v}' for k, v in signals_by_type.items()])}")
@@ -447,7 +482,10 @@ class TradingSystemManager:
             await asyncio.sleep(2)
             
             self.start_portfolio_manager()
-           
+            
+            self.start_risk_manager()
+            await asyncio.sleep(1)
+            
             self.start_trading_strategy()
             await asyncio.sleep(2)
             

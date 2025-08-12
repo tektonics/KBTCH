@@ -142,8 +142,8 @@ class EventTypes:
     
     # Risk events
     RISK_VIOLATION = "risk_violation"
-    POSITION_LIMIT_REACHED = "position_limit_reached"
-    LOSS_LIMIT_REACHED = "loss_limit_reached"
+    RISK_APPROVED = "risk_approved"
+    RISK_REJECTED = "risk_rejected"
     
     # System events
     SYSTEM_START = "system_start"
