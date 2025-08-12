@@ -7,16 +7,15 @@ import time
 import signal
 from typing import Optional, List
 from collections import deque
-
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from UDM import UnifiedCryptoManager
 from KMS import KalshiClient
 from CEP import CEPEngine
 from strategy import TradingStrategy
 from event_bus import event_bus, EventTypes
+from portfolio_manager import PortfolioManager
 
 os.makedirs('logs', exist_ok=True)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 class LogCapture(logging.Handler):
     def __init__(self, maxlen=10):
@@ -40,8 +39,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('logs/trading_system.log'),
-        log_capture  # Capture for dashboard display
-        # NO StreamHandler = no console interference
+        log_capture
     ],
     force=True
 )
@@ -58,6 +56,7 @@ class TradingSystemManager:
         self.strategy: Optional[TradingStrategy] = None
         self.udm_thread: Optional[threading.Thread] = None
         self.kms_task: Optional[asyncio.Task] = None
+        self.portfolio_manager: Optional[PortfolioManager] = None
         self.running = False
 
         self.log_capture = log_capture
@@ -86,7 +85,7 @@ class TradingSystemManager:
         def price_update_handler(event):
             self.stats['price_updates'] += 1
             brti_price = event.data.get('brti_price')
-            if self.stats['price_updates'] % 50 == 0:  # Log every 50th update
+            if self.stats['price_updates'] % 50 == 0:
                 logger.info(f"📊 Price Update #{self.stats['price_updates']}: BRTI ${brti_price:,.2f}")
         
         def market_data_handler(event):
@@ -214,6 +213,14 @@ class TradingSystemManager:
             logger.error(f"Failed to start Trading Strategy: {e}")
             raise
     
+    def start_portfolio_manager(self):
+        try:
+            self.portfolio_manager = PortfolioManager()
+            logger.info("✅ Portfolio Manager started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start Portfolio Manager: {e}")
+            raise
+
     def _smooth_clear_and_print(self, content: str):
         
         import os
@@ -231,12 +238,6 @@ class TradingSystemManager:
         
         lines.append(f"KBTCH TRADING SYSTEM - Runtime: {runtime:.0f}s")
         lines.append("=" * 80)
-        
-        # System Statistics
-        lines.append(f"Price Updates:           {self.stats['price_updates']}")
-        lines.append(f"Market Data Updates:     {self.stats['market_data_updates']}")
-        lines.append(f"CEP Enriched Events:     {self.stats['enriched_events']}")
-        lines.append(f"Trading Signals:         {self.stats['signals_generated']}")
         
         # CEP Engine Status
         if self.cep_engine:
@@ -323,6 +324,43 @@ class TradingSystemManager:
                 if recent_signals:
                     lines.append(f"Recent Signals:          {len(recent_signals)} in last 5min")
 
+        if self.portfolio_manager:
+            try:
+                balance = self.portfolio_manager.get_balance()
+                positions = self.portfolio_manager.get_positions()
+            
+                lines.append(f"\n💰 PORTFOLIO STATUS")
+                lines.append(f"Balance:                 ${balance.get('balance', 0) / 100:,.2f}")
+            
+            # Active positions
+                position_list = positions.get('market_positions', [])
+                active_positions = [p for p in position_list if p.get('position', 0) != 0]
+            
+                lines.append(f"Active Positions:        {len(active_positions)}")
+            
+                if active_positions:
+                    total_exposure = sum(abs(p.get('position', 0) * p.get('market_exposure', 0)) for p in active_positions) / 100
+                    lines.append(f"Total Exposure:          ${total_exposure:,.2f}")
+                
+                # Show top 3 positions
+                    for i, pos in enumerate(active_positions[:3]):
+                        market = pos.get('market_ticker', 'Unknown')[:15]
+                        position = pos.get('position', 0)
+                        value = pos.get('market_exposure', 0) * position / 100
+                        side = "YES" if position > 0 else "NO"
+                        lines.append(f"Position {i+1}:            {market} {side} {abs(position)} (${value:,.0f})")
+                
+                    if len(active_positions) > 3:
+                        lines.append(f"... and {len(active_positions) - 3} more positions")
+                else:
+                    lines.append(f"No active positions")
+                
+            except Exception as e:
+                lines.append(f"\n💰 PORTFOLIO STATUS")
+                lines.append(f"Error fetching portfolio: {str(e)[:50]}")
+        else:
+            lines.append(f"\n💰 PORTFOLIO: Not initialized")
+
         # Kalshi Market Display
         if self.kms and self.kms.active_market_info:
             lines.append(f"\n📈 KALSHI MARKETS")
@@ -382,7 +420,6 @@ class TradingSystemManager:
         lines.append("=" * 80)
         lines.append("Press Ctrl+C to stop")
         
-        # NOW: Print everything at once with smooth cursor positioning
         self._smooth_clear_and_print('\n'.join(lines))
 
     async def shutdown(self):
@@ -409,6 +446,8 @@ class TradingSystemManager:
             self.start_cep_engine()
             await asyncio.sleep(2)
             
+            self.start_portfolio_manager()
+           
             self.start_trading_strategy()
             await asyncio.sleep(2)
             

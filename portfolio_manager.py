@@ -1,10 +1,11 @@
+import requests
 import time
 import logging
 from typing import Dict, Any
 from kalshi_base import KalshiAPIClient
 from config.kalshiconfig import API_ENDPOINTS
 
-class KalshiExecutionManager(KalshiAPIClient):
+class PortfolioManager(KalshiAPIClient):
     def __init__(self):
         super().__init__() 
 
