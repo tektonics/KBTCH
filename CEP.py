@@ -639,10 +639,6 @@ class CEPEngine:
             
             self.enriched_events_published += 1
             
-            if self.enriched_events_published % 50 == 0:  # Log every 50th enriched event
-                logger.info(f"CEP Engine: Published {self.enriched_events_published} enriched events, "
-                           f"detected {self.patterns_detected} patterns")
-                
         except Exception as e:
             logger.error(f"Error publishing enriched event: {e}")
     
