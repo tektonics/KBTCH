@@ -71,7 +71,6 @@ class KalshiClient(KalshiAPIClient):
         self._reconnect_attempts_map: Dict[str, int] = {}
         self._max_reconnect_attempts = 5
         self._reconnect_delay = 1
-        self.btc_monitor = BTCPriceMonitor()
         self.params = TradingParams()
         self.market_selector = MarketSelector(self.params)
         self.all_markets_for_event: List[Dict] = []
@@ -82,6 +81,10 @@ class KalshiClient(KalshiAPIClient):
         self.event_ticker: Optional[str] = None
         self._shutdown_requested = False
         self.update_interval = .01
+        event_bus.subscribe(EventTypes.PRICE_UPDATE, self._handle_btc_price_update)
+
+    def _handle_btc_price_update(self, event):
+        self.last_btc_price = event.data.get('brti_price')
 
     def get_markets(self, event_ticker: str) -> Dict[str, Any]:
         method = "GET"
@@ -312,14 +315,10 @@ class KalshiClient(KalshiAPIClient):
                 logger.error(f"Failed to fetch markets for {self.event_ticker}: {e}")
                 return
 
-        btc_price = self.btc_monitor.get_current_price()
-        if btc_price:
-            self.last_btc_price = btc_price
-            self.current_volatility = self.btc_monitor.calculate_volatility()
-            logger.debug(f"Current BTC: ${self.last_btc_price:,.2f}, Volatility: {self.current_volatility:.2f}")
-        else:
+        if not self.last_btc_price:
             logger.warning("No current BTC price data available for market selection. Skipping market update.")
             return
+        self.current_volatility = 0.0
 
         target_count = self.market_selector.calculate_adaptive_market_count(self.current_volatility, 1.0)
         target_markets = self.market_selector.select_target_markets(
@@ -417,63 +416,6 @@ class KalshiClient(KalshiAPIClient):
         logger.info("Shutdown requested for adaptive market tracking.")
         self._shutdown_requested = True
 
-class BTCPriceMonitor:
-    def __init__(self, price_file: str = "data/unified_crypto_data.json"):
-        self.price_file = Path(price_file)
-        self.last_price = None
-        self.last_modified = None
-        self.last_check = 0
-        self.check_interval = 0.05
-        self.price_history = []
-        self.max_history_minutes = 30
-
-    def get_current_price(self) -> Optional[float]:
-        now = time.time()
-        if now - self.last_check < self.check_interval:
-            return self.last_price
-        self.last_check = now
-
-        try:
-            if not self.price_file.exists():
-                return None
-            current_modified = self.price_file.stat().st_mtime
-            if current_modified == self.last_modified:
-                return self.last_price
-            with open(self.price_file, 'r') as f:
-                data = json.load(f)
-            price = data.get("brti", {}).get("price")
-            if price and isinstance(price, (int, float)) and price > 0:
-                new_price = float(price)
-                if new_price != self.last_price:
-                    self.price_history.append((now, new_price))
-                    self._cleanup_price_history(now)
-                self.last_price = new_price
-                self.last_modified = current_modified
-                return self.last_price
-        except (json.JSONDecodeError, IOError) as e:
-            logger.debug(f"Error reading BTC price file: {e}")
-            return None
-
-    def _cleanup_price_history(self, current_time: float):
-        cutoff_time = current_time - (self.max_history_minutes * 60)
-        self.price_history = [(t, p) for t, p in self.price_history if t > cutoff_time]
-
-    def calculate_volatility(self, window_minutes: int = 15) -> float:
-        cutoff_time = time.time() - (window_minutes * 60)
-        recent_history = [(t, p) for t, p in self.price_history if t > cutoff_time]
-
-        if len(recent_history) < 3:
-            return 0.0
-
-        prices = [price for _, price in recent_history]
-        returns = [(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, len(prices))]
-
-        if not returns:
-            return 0.0
-
-        std_dev = np.std(returns, ddof=1) if len(returns) > 1 else 0.0
-
-        return std_dev * np.sqrt(525600)
 
 class MarketSelector:
     def __init__(self, params: TradingParams):

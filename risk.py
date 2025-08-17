@@ -24,7 +24,8 @@ class RiskManager:
     def __init__(self, portfolio_manager):
         self.portfolio_manager = portfolio_manager
         self.limits = RiskLimits()
-        
+        self.position_entry_prices = {}
+        self.stop_loss_percentage = 0.15
         self.daily_trades = 0
         self.daily_pnl = 0.0
         self.last_reset_date = time.strftime("%Y-%m-%d")
@@ -78,6 +79,33 @@ class RiskManager:
                 source="risk_manager"
             )
     
+    def check_stop_losses(self):
+        try:
+            positions_data = self.portfolio_manager.get_positions()
+            for position in positions_data.get('market_positions', []):
+                market = position['market_ticker']
+                entry_price = self.position_entry_prices.get(market, 0)
+                current_price = position.get('last_mark_price', 0)
+            
+                if entry_price > 0 and current_price > 0:
+                    loss_pct = (entry_price - current_price) / entry_price
+                
+                    if loss_pct > self.stop_loss_percentage:
+                       # Generate SELL signal for stop loss
+                        stop_signal = {
+                            'market_ticker': market,
+                            'signal_type': f"SELL_{position['side'].upper()}",
+                            'quantity': abs(position['position']),
+                            'reason': f'STOP LOSS: {loss_pct:.1%} loss',
+                            'confidence': 1.0,
+                            'market_yes_price': current_price,
+                            'market_no_price': 100 - current_price
+                        }
+                        event_bus.publish(EventTypes.SIGNAL_GENERATED, stop_signal, source="risk_manager")
+                        logger.warning(f"⛔ STOP LOSS triggered for {market}")
+        except Exception as e:
+            logger.error(f"Error checking stop losses: {e}")
+
     def _validate_all_risks(self, signal_data: Dict[str, Any]) -> Tuple[bool, str]:
         
         can_trade, reason = self._check_signal_frequency(signal_data)
@@ -232,10 +260,13 @@ class RiskManager:
     def _track_approved_signal(self, signal_data: Dict[str, Any]) -> None:
         market_ticker = signal_data.get("market_ticker")
         current_time = time.time()
-        
         self.recent_signals[market_ticker].append(current_time)
-        
         self.daily_trades += 1
+
+        if signal_data.get('signal_type', '').startswith('BUY'):
+            market = signal_data.get('market_ticker')
+            price = signal_data.get('market_yes_price') if 'YES' in signal_data['signal_type'] else signal_data.get('market_no_price')
+            self.position_entry_prices[market] = price
     
     def _track_risk_violation(self, signal_data: Dict[str, Any], reason: str) -> None:
         violation = {

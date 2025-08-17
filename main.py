@@ -553,7 +553,6 @@ class TradingSystemManager:
     
     async def run(self):
         try:
-            # Print startup mode
             if self.papertrading_enabled:
                 logger.info("🎮 Starting KBTCH Trading System in PAPERTRADING mode")
                 logger.info("💰 No real money will be used - all trades are simulated")
@@ -571,7 +570,6 @@ class TradingSystemManager:
             
             self.start_portfolio_manager()
             
-            # Start execution manager (will use simulated version if papertrading)
             self.start_execution_manager()
             await asyncio.sleep(1)
             
@@ -599,7 +597,11 @@ class TradingSystemManager:
                 if self.kms_task and self.kms_task.done():
                     logger.error("❌ KMS task has stopped unexpectedly")
                     break
-                
+
+                if int(current_time) % 5 == 0:
+                    if self.risk_manager:
+                        self.risk_manager.check_stop_losses()
+
                 await asyncio.sleep(0.2)
                 
         except Exception as e:

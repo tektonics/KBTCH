@@ -1,11 +1,8 @@
 import sys
 import asyncio
 import ccxt.pro
-import json
 import time
-import threading
 import numpy as np
-from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
@@ -34,9 +31,7 @@ class OrderBookData:
     error_reason: Optional[str] = None
 
 class UnifiedCryptoManager:
-    def __init__(self, output_file: str = "data/unified_crypto_data.json"):
-        self.output_file = Path(output_file)
-        self.data_lock = threading.Lock()
+    def __init__(self):
         self.exchange_history = {}
         self.rsi_period = 14
         self.volume_baseline_periods = 20
@@ -64,44 +59,13 @@ class UnifiedCryptoManager:
             'total_calculations': 0,
             'successful_calculations': 0,
             'exchange_failures': {ex: 0 for ex in self.exchange_config.keys()},
-            'json_writes': 0,
-            'json_write_errors': 0
         }
         
         self.display_line_count = 0
         self.last_price = None
         self.calculation_count = 0
         
-        self.initialize_json_file()
-    
-    def initialize_json_file(self):
-        try:
-            initial_data = {
-                "timestamp": time.time(),
-                "last_updated": datetime.now().isoformat(),
-                "brti": {
-                    "price": None,
-                    "utilized_depth": None,
-                    "dynamic_cap": None,
-                    "valid_exchanges": 0,
-                    "total_exchanges": 0,
-                    "exchange_status": {},
-                    "status": "initializing"
-                },
-                "ohlcv_analysis": {
-                    "volume_spikes": [],
-                    "rsi": 50,
-                    "momentum": "→",
-                    "avg_price": 0,
-                    "status": "initializing"
-                }
-            }
-            with self.data_lock:
-                with open(self.output_file, 'w') as f:
-                    json.dump(initial_data, f, indent=2)
-        except Exception as e:
-            print(f"Failed to initialize JSON file: {e}")
-    
+     
     def clear_display(self):
         if self.display_line_count > 0:
             sys.stdout.write('\r\033[K')
@@ -118,7 +82,6 @@ class UnifiedCryptoManager:
         print(line)
         self.display_line_count = 0
     
-    # OHLCV Methods
     def update_exchange_data(self, exchange_id: str, symbol: str, ohlcv_data: list):
         if not ohlcv_data:
             return
@@ -244,7 +207,6 @@ class UnifiedCryptoManager:
             return sum(current_prices) / len(current_prices)
         return 0
     
-    # BRTI Methods
     def validate_order_book(self, ob: OrderBookData, current_time: int) -> bool:
         age_seconds = (current_time - ob.retrieval_timestamp) / 1000
         if age_seconds >= self.max_data_age_seconds:
@@ -504,7 +466,6 @@ class UnifiedCryptoManager:
         valid_codes = [exchange_codes.get(ex, ex[:2].upper()) for ex in valid_exchanges]
         invalid_codes = [exchange_codes.get(ex, ex[:2].upper()) for ex in invalid_exchanges]
         
-        # Build the display line matching original BRTI format
         parts = [
             f"{current_time}",
             f"#{self.calculation_count:04d}",
@@ -517,50 +478,13 @@ class UnifiedCryptoManager:
         if invalid_codes:
             parts.append(f"❌[{','.join(invalid_codes)}]")
         
-        # Add OHLCV data
         parts.append(f"RSI: {ohlcv_data['rsi']:.0f}")
         parts.append(f"{ohlcv_data['momentum']}")
-        
+
         if ohlcv_data['volume_spikes']:
             parts.append(f"Vol: {','.join(ohlcv_data['volume_spikes'])}")
-        
         return " | ".join(parts)
-    
-    def write_unified_data_to_json(self, brti_value: Optional[float], brti_data: Dict[str, Any], ohlcv_data: Dict[str, Any]):
-        try:
-            current_time = time.time()
-            timestamp_iso = datetime.fromtimestamp(current_time).isoformat()
-            
-            data = {
-                "timestamp": current_time,
-                "last_updated": timestamp_iso,
-                "brti": {
-                    "price": round(brti_value, 2) if brti_value else None,
-                    "utilized_depth": round(brti_data.get('utilized_depth', 0), 2) if brti_value else None,
-                    "dynamic_cap": round(brti_data.get('dynamic_cap', 0), 2) if brti_value else None,
-                    "valid_exchanges": brti_data.get('valid_exchanges', 0),
-                    "total_exchanges": brti_data.get('total_exchanges', 0),
-                    "exchange_status": brti_data.get('exchange_status', {}),
-                    "status": "active" if brti_value else "error"
-                },
-                "ohlcv_analysis": {
-                    "volume_spikes": ohlcv_data['volume_spikes'],
-                    "rsi": round(ohlcv_data['rsi'], 0),
-                    "momentum": ohlcv_data['momentum'],
-                    "avg_price": round(ohlcv_data['avg_price'], 2),
-                    "status": "active"
-                }
-            }
-            
-            with self.data_lock:
-                with open(self.output_file, 'w') as f:
-                    json.dump(data, f, indent=2)
-            
-            self.stats['json_writes'] += 1
-            
-        except Exception as e:
-            logger.error(f"Failed to write unified data to JSON: {e}")
-            self.stats['json_write_errors'] += 1
+
     
     async def fetch_ohlcv_continuously(self, exchange, symbol):
         while True:
@@ -611,10 +535,9 @@ class UnifiedCryptoManager:
         try:
             current_time = int(time.time() * 1000)
 
-            # Fetch all order books
             order_book_tasks = []
             for exchange_id, exchange in exchanges.items():
-                if self.exchange_config[exchange_id]['brti_symbol']: # Only for BRTI-enabled exchanges
+                if self.exchange_config[exchange_id]['brti_symbol']:
                     task = self.fetch_order_book_data(exchange, exchange_id)
                     order_book_tasks.append(task)
             order_books = []
@@ -627,14 +550,11 @@ class UnifiedCryptoManager:
             if not order_books:
                 return None, {}
 
-            # Validate order books
+
             for ob in order_books:
                 self.validate_order_book(ob, current_time)
 
-            # Check price deviation
             order_books = self.check_price_deviation(order_books)
-
-            # Filter valid order books
             valid_order_books = [ob for ob in order_books if ob.is_valid]
 
             if len(valid_order_books) < 2:
@@ -645,8 +565,6 @@ class UnifiedCryptoManager:
                 }
                 return None, brti_data
 
-            # Consolidate order books
-            # CHANGE: Capture dynamic_cap returned by consolidate_order_books
             consolidated_bids, consolidated_asks, dynamic_cap = self.consolidate_order_books(valid_order_books)
 
             if not consolidated_bids or not consolidated_asks:
@@ -657,13 +575,8 @@ class UnifiedCryptoManager:
                 }
                 return None, brti_data
 
-            # Calculate curves
             curves = self.calculate_curves(consolidated_bids, consolidated_asks)
-
-            # Calculate utilized depth
             utilized_depth = self.calculate_utilized_depth(curves)
-
-            # Apply exponential weighting
             brti_value = self.apply_exponential_weighting(curves, utilized_depth)
 
             brti_data = {
@@ -693,7 +606,6 @@ class UnifiedCryptoManager:
     
     async def run_unified_system(self):
         self.print_new_line("Starting Unified Crypto Data Manager...")
-        self.print_new_line(f"JSON output: {self.output_file.absolute()}")
         self.print_new_line("=" * 100)
         
         exchanges = {}
@@ -742,12 +654,10 @@ class UnifiedCryptoManager:
                         source="udm"
                 )
 
-                # Display single line update
                 if brti_value is not None:
-                    # Create mock order books for display formatting
                     mock_order_books = []
                     for ex_id in exchanges.keys():
-                        if self.exchange_config[ex_id]['brti_symbol']:  # Only BRTI exchanges
+                        if self.exchange_config[ex_id]['brti_symbol']:
                             is_valid = brti_data['exchange_status'].get(ex_id) == "valid"
                             error_reason = None if is_valid else brti_data['exchange_status'].get(ex_id)
                             mock_order_books.append(OrderBookData(ex_id, "", 0, [], [], is_valid, error_reason))
@@ -761,13 +671,9 @@ class UnifiedCryptoManager:
                     )
                     self.update_single_line_display(display_line)
                 else:
-                    error_line = f"{datetime.now().strftime('%H:%M:%S')} | #{self.calculation_count + 1:04d} | ERROR: BRTI calculation failed"
+                    error_line = "{datetime.now().strftime('%H:%M:%S')} |"
                     self.update_single_line_display(error_line)
                 
-                # Write unified data to JSON
-                self.write_unified_data_to_json(brti_value, brti_data, ohlcv_data)
-                
-                # Sleep to maintain interval
                 calculation_time = time.time() - calculation_start
                 sleep_time = max(0, .2 - calculation_time)
                 await asyncio.sleep(sleep_time)
@@ -777,11 +683,9 @@ class UnifiedCryptoManager:
         except Exception as e:
             self.print_new_line(f"\nUnexpected error: {e}")
         finally:
-            # Cancel OHLCV tasks
             for task in ohlcv_tasks:
                 task.cancel()
             
-            # Close all exchanges
             for exchange in exchanges.values():
                 await exchange.close()
             
@@ -793,8 +697,6 @@ class UnifiedCryptoManager:
         self.print_new_line("=" * 60)
         print(f"Total calculations: {self.stats['total_calculations']}")
         print(f"Successful calculations: {self.stats['successful_calculations']}")
-        print(f"JSON writes: {self.stats['json_writes']}")
-        print(f"JSON write errors: {self.stats['json_write_errors']}")
         
         if self.stats['total_calculations'] > 0:
             success_rate = (self.stats['successful_calculations'] / 

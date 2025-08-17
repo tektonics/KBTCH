@@ -1,8 +1,3 @@
-"""
-Pure Trading Strategy Engine for KBTCH Trading System
-Receives enriched events from CEP and makes trading decisions.
-"""
-
 import time
 import logging
 from typing import Dict, Any, Optional, List
@@ -13,11 +8,10 @@ from config.config_manager import config
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class TradingSignal:
     market_ticker: str
-    signal_type: str  # BUY_YES, BUY_NO, SELL_YES, SELL_NO
+    signal_type: str
     confidence: float
     strike_price: float
     current_brti: float
@@ -26,7 +20,6 @@ class TradingSignal:
     reason: str
     timestamp: float
     
-    # Enhanced fields from CEP
     momentum_pattern: Optional[str] = None
     market_regime: Optional[str] = None
     volatility_level: Optional[str] = None
@@ -35,18 +28,16 @@ class TradingSignal:
 
 
 class TradingStrategy:
-    """Pure trading strategy - receives enriched events and generates trading signals"""
     
     def __init__(self):
         self.strategy_settings = config.get_strategy_settings()
-        
+
         # Strategy parameters
         self.min_divergence_pct = 0.02      # 2% minimum divergence
         self.max_divergence_pct = 0.20      # 20% maximum divergence  
         self.base_confidence_threshold = 0.5
         self.min_arbitrage_edge = 5.0       # 5 cents minimum edge
         
-        # Strategy state (NOT event processing state)
         self.current_brti: Optional[float] = None
         self.active_opportunities: Dict[str, Dict] = {}
         self.last_signal_time: Dict[str, float] = {}
@@ -66,13 +57,26 @@ class TradingStrategy:
         self.signals_by_type = defaultdict(int)
         self.opportunities_analyzed = 0
         
-        # Subscribe to enriched events from CEP
         event_bus.subscribe(EventTypes.ENRICHED_EVENT, self._handle_enriched_event)
-        
-        logger.info("Trading Strategy initialized and subscribed to enriched events")
+        self.portfolio_positions = {}
+        event_bus.subscribe(EventTypes.ORDER_FILLED, self._update_positions)
     
+    def _update_positions(self, event):
+        data = event.data
+        market = data.get('market_ticker')
+        side = data.get('side')
+        action = data.get('action')
+        contracts = data.get('filled_count', 0)
+    
+        if market not in self.portfolio_positions:
+            self.portfolio_positions[market] = {'yes': 0, 'no': 0}
+    
+        if action == 'buy':
+            self.portfolio_positions[market][side] += contracts
+        else:
+            self.portfolio_positions[market][side] -= contracts
+
     def _handle_enriched_event(self, event) -> None:
-        """Process enriched events from CEP engine"""
         try:
             data = event.data
             event_type = data.get("event_type")
@@ -374,6 +378,13 @@ class TradingStrategy:
                     arbitrage_edge=arbitrage_edge
                 )
         
+        position = self.portfolio_positions.get(market_ticker, {'yes': 0, 'no': 0})
+
+        if distance_from_strike > 0 and position['yes'] > 0:
+            return None
+        if distance_from_strike < 0 and position['no'] > 0:
+            return None
+
         return signal
     
     def _process_arbitrage_opportunity(self, opportunity: Dict[str, Any], context_data: Dict[str, Any]) -> None:
