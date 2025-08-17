@@ -37,14 +37,11 @@ class UnifiedCryptoManager:
     def __init__(self, output_file: str = "data/unified_crypto_data.json"):
         self.output_file = Path(output_file)
         self.data_lock = threading.Lock()
-        
-        # OHLCV components
         self.exchange_history = {}
         self.rsi_period = 14
         self.volume_baseline_periods = 20
         self.momentum_periods = 5
         
-        # BRTI components  
         self.max_data_age_seconds = 30
         self.max_price_deviation_pct = 5.0
         self.max_spread_volume_deviation_pct = 0.5
@@ -54,7 +51,6 @@ class UnifiedCryptoManager:
         self.order_size_cap_multiplier = 5.0
         self.spacing_parameter = 1.0
         
-        # Exchange configuration
         self.exchange_config = {
             'coinbase': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': 'BTC/USD'},
             'kraken': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': 'BTC/USD'},
@@ -64,7 +60,6 @@ class UnifiedCryptoManager:
             'okx': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': None}
         }
         
-        # Statistics and display
         self.stats = {
             'total_calculations': 0,
             'successful_calculations': 0,
@@ -580,7 +575,7 @@ class UnifiedCryptoManager:
     async def fetch_order_book_data(self, exchange, exchange_id: str) -> Optional[OrderBookData]:
         try:
             symbol = self.exchange_config[exchange_id]['brti_symbol']
-            if not symbol:  # Skip exchanges without BRTI symbol (like OKX)
+            if not symbol:
                 return None
                 
             order_book = await exchange.fetch_order_book(symbol, limit=self.max_order_book_depth)
@@ -691,7 +686,6 @@ class UnifiedCryptoManager:
     async def start_unified_exchange(self, exchange_name):
         exchange = getattr(ccxt.pro, exchange_name)({})
         
-        # Start OHLCV fetching
         ohlcv_symbol = self.exchange_config[exchange_name]['ohlcv_symbol']
         ohlcv_task = asyncio.create_task(self.fetch_ohlcv_continuously(exchange, ohlcv_symbol))
         
@@ -702,7 +696,6 @@ class UnifiedCryptoManager:
         self.print_new_line(f"JSON output: {self.output_file.absolute()}")
         self.print_new_line("=" * 100)
         
-        # Initialize all exchanges
         exchanges = {}
         ohlcv_tasks = []
         
@@ -719,7 +712,6 @@ class UnifiedCryptoManager:
             while True:
                 calculation_start = time.time()
                 
-                # Calculate OHLCV metrics
                 volume_spikes = self.calculate_volume_spikes()
                 rsi = self.calculate_rsi()
                 momentum = self.calculate_momentum()
@@ -732,10 +724,8 @@ class UnifiedCryptoManager:
                     'avg_price': avg_price
                 }
                 
-                # Calculate BRTI
                 brti_value, brti_data = await self.calculate_brti_with_exchanges(exchanges)
                 
-               # Publish BRTI update to event bus
                 if brti_value is not None:
                     event_bus.publish(
                         EventTypes.PRICE_UPDATE,

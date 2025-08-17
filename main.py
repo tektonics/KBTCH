@@ -1,4 +1,3 @@
-# main.py (Updated with Papertrading Support)
 import asyncio
 import threading
 import logging
@@ -15,7 +14,6 @@ from strategy import TradingStrategy
 from event_bus import event_bus, EventTypes
 from config.config_manager import config
 
-# Import both real and simulated components
 from portfolio_manager import PortfolioManager
 from simulated_portfolio_manager import SimulatedPortfolioManager
 from execution_manager import ExecutionManager
@@ -103,7 +101,6 @@ class TradingSystemManager:
             brti_price = event.data.get('brti_price')
             if self.stats['price_updates'] % 50 == 0:
                 mode_indicator = "📊💰" if self.papertrading_enabled else "📊"
-                logger.info(f"{mode_indicator} Price Update #{self.stats['price_updates']}: BRTI ${brti_price:,.2f}")
         
         def market_data_handler(event):
             self.stats['market_data_updates'] += 1
@@ -490,14 +487,12 @@ class TradingSystemManager:
             
             lines.append(f"Event: {event_ticker} | BTC: ${btc_price:,.2f} | KMS Vol: {volatility:.2f}")
             
-            # Show market ladder
             sorted_markets = sorted(self.kms.active_market_info.values(), key=lambda m: m.strike)
             if sorted_markets:
                 strike_labels = []
                 for market_info in sorted_markets:
                     label = f"${market_info.strike:,.0f}🎯" if market_info.is_primary else f"${market_info.strike:,.0f}"
                     strike_labels.append(label)
-                lines.append(f"Strike Ladder: {' | '.join(strike_labels)}")
                 
                 # Market details (show all markets)
                 for i, market_info in enumerate(sorted_markets):
