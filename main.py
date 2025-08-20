@@ -51,6 +51,124 @@ logging.getLogger('websockets').setLevel(logging.WARNING)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+class PaperPortfolioManager:
+    """Simulated portfolio manager for paper trading"""
+    
+    def __init__(self):
+        self.balance = config.get_papertrading_settings().initial_balance
+        self.positions = {}
+        self.orders = {}
+        self.fills = []
+        self.start_time = time.time()
+        
+    def get_balance(self) -> dict:
+        return {"balance": self.balance}
+    
+    def get_positions(self) -> dict:
+        position_list = []
+        for market, pos in self.positions.items():
+            if pos["quantity"] != 0:
+                position_list.append({
+                    "market_ticker": market,
+                    "position": pos["quantity"],
+                    "market_exposure": abs(pos["quantity"] * pos["avg_price"])
+                })
+        return {"market_positions": position_list}
+    
+    def get_fills(self) -> dict:
+        return {"fills": self.fills}
+    
+    def get_orders(self) -> dict:
+        return {"orders": list(self.orders.values())}
+    
+    def simulate_fill(self, order_data):
+        """Simulate order execution"""
+        settings = config.get_papertrading_settings()
+        
+        # Simulate fill probability
+        import random
+        if random.random() > settings.fill_probability:
+            return False
+        
+        market = order_data.get("market_ticker")
+        side = order_data.get("side")
+        quantity = order_data.get("quantity", 1)
+        price = order_data.get("price", 50)
+        
+        # Apply slippage
+        slippage = random.uniform(-settings.slippage_bps, settings.slippage_bps) / 100
+        fill_price = price + (price * slippage)
+        fill_price = max(1, min(99, int(fill_price)))
+        
+        # Update position
+        if market not in self.positions:
+            self.positions[market] = {"quantity": 0, "avg_price": 0}
+        
+        pos = self.positions[market]
+        total_cost = pos["quantity"] * pos["avg_price"] + quantity * fill_price
+        total_quantity = pos["quantity"] + (quantity if side == "yes" else -quantity)
+        
+        if total_quantity != 0:
+            pos["avg_price"] = total_cost / abs(total_quantity)
+        pos["quantity"] = total_quantity
+        
+        # Update balance
+        cost = quantity * fill_price + settings.commission_per_contract
+        self.balance -= cost
+        
+        # Record fill
+        fill = {
+            "market_ticker": market,
+            "side": side,
+            "quantity": quantity,
+            "price": fill_price,
+            "timestamp": time.time()
+        }
+        self.fills.append(fill)
+        
+        return True
+
+class PaperExecutionManager:
+    """Simulated execution manager for paper trading"""
+    
+    def __init__(self, portfolio_manager):
+        self.portfolio_manager = portfolio_manager
+        self.orders_sent = 0
+        self.orders_failed = 0
+        self.settings = config.get_papertrading_settings()
+        
+        event_bus.subscribe(EventTypes.ORDER_PLACED, self._handle_order_placed)
+        
+    def _handle_order_placed(self, event):
+        """Handle simulated order placement"""
+        try:
+            order_data = event.data
+            
+            # Simulate fill delay
+            time.sleep(self.settings.fill_delay_seconds)
+            
+            # Try to simulate fill
+            if self.portfolio_manager.simulate_fill(order_data):
+                self.orders_sent += 1
+                logger.info(f"📄 PAPER TRADE EXECUTED: {order_data.get('signal_type')} {order_data.get('market_ticker')}")
+            else:
+                self.orders_failed += 1
+                logger.warning(f"📄 PAPER TRADE FAILED: {order_data.get('market_ticker')} (simulation)")
+                
+        except Exception as e:
+            logger.error(f"Error in paper execution: {e}")
+            self.orders_failed += 1
+    
+    def get_status(self) -> dict:
+        total_orders = self.orders_sent + self.orders_failed
+        success_rate = (self.orders_sent / total_orders * 100) if total_orders > 0 else 0
+        
+        return {
+            "orders_sent": self.orders_sent,
+            "orders_failed": self.orders_failed,
+            "api_success_rate": f"{success_rate:.1f}%"
+        }
+
 class TradingSystemManager:
     def __init__(self):
         self.udm: Optional[UnifiedCryptoManager] = None
@@ -64,6 +182,10 @@ class TradingSystemManager:
         self.portfolio_manager = None
         self.execution_manager = None
         self.risk_manager = None
+        
+        # Trading mode
+        self.is_paper_trading = config.is_papertrading_enabled()
+        self.trading_mode = config.get_trading_mode()
         
         self.running = False
         self.log_capture = log_capture
@@ -148,7 +270,7 @@ class TradingSystemManager:
             data = event.data
             
             # Enhanced signal display with CEP data
-            mode_indicator = "🚨"
+            mode_indicator = "📄" if self.is_paper_trading else "🚨"
             logger.info(f"{mode_indicator} TRADING SIGNAL #{self.stats['signals_generated']}:")
             logger.info(f"    Market: {data.get('market_ticker')}")
             logger.info(f"    Signal: {data.get('signal_type')}")
@@ -188,22 +310,30 @@ class TradingSystemManager:
         event_bus.subscribe(EventTypes.SIGNAL_GENERATED, signal_handler)
 
     def start_portfolio_manager(self):
-        """Start portfolio manager"""
+        """Start portfolio manager based on trading mode"""
         try:
-            self.portfolio_manager = PortfolioManager()
-            logger.info("✅ Live Portfolio Manager started")
+            if self.is_paper_trading:
+                self.portfolio_manager = PaperPortfolioManager()
+                logger.info("✅ Paper Portfolio Manager started")
+            else:
+                self.portfolio_manager = PortfolioManager()
+                logger.info("✅ Live Portfolio Manager started")
         except Exception as e:
             logger.error(f"Failed to start Portfolio Manager: {e}")
             raise
 
     def start_execution_manager(self):
-        """Start execution manager"""
+        """Start execution manager based on trading mode"""
         try:
-            from order_manager import OrderManager
-            if not hasattr(self, 'order_manager'):
-                self.order_manager = OrderManager()
-            self.execution_manager = ExecutionManager(self.order_manager)
-            logger.info("✅ Live Execution Manager started")
+            if self.is_paper_trading:
+                self.execution_manager = PaperExecutionManager(self.portfolio_manager)
+                logger.info("✅ Paper Execution Manager started")
+            else:
+                from order_manager import OrderManager
+                if not hasattr(self, 'order_manager'):
+                    self.order_manager = OrderManager()
+                self.execution_manager = ExecutionManager(self.order_manager)
+                logger.info("✅ Live Execution Manager started")
         except Exception as e:
             logger.error(f"Failed to start Execution Manager: {e}")
             raise
@@ -213,7 +343,8 @@ class TradingSystemManager:
             from risk import RiskManager
             self.risk_manager = RiskManager(self.portfolio_manager)
             
-            logger.info("✅ Risk Manager started for live trading")
+            mode_text = "paper trading" if self.is_paper_trading else "live trading"
+            logger.info(f"✅ Risk Manager started for {mode_text}")
         except Exception as e:
             logger.error(f"Failed to start Risk Manager: {e}")
             raise
@@ -256,7 +387,8 @@ class TradingSystemManager:
             self.kms_task = asyncio.create_task(
                 self.kms.start_adaptive_market_tracking()
             )
-            logger.info("✅ KMS started for live trading")
+            mode_text = "paper trading" if self.is_paper_trading else "live trading"
+            logger.info(f"✅ KMS started for {mode_text}")
         except Exception as e:
             logger.error(f"Failed to start KMS: {e}")
             raise
@@ -292,7 +424,10 @@ class TradingSystemManager:
         runtime = time.time() - self.stats['start_time']
         
         # Header
-        mode_indicator = "🔴 LIVE TRADING"
+        if self.is_paper_trading:
+            mode_indicator = "📄 PAPER TRADING"
+        else:
+            mode_indicator = "🔴 LIVE TRADING"
         lines.append(f"KBTCH TRADING SYSTEM - {mode_indicator} - Runtime: {runtime:.0f}s")
         lines.append("=" * 80)
         
@@ -389,7 +524,10 @@ class TradingSystemManager:
                 balance = self.portfolio_manager.get_balance()
                 positions = self.portfolio_manager.get_positions()
                 
-                portfolio_header = "💰 LIVE PORTFOLIO"
+                if self.is_paper_trading:
+                    portfolio_header = "💰 PAPER PORTFOLIO"
+                else:
+                    portfolio_header = "💰 LIVE PORTFOLIO"
                 lines.append(f"\n{portfolio_header}")
                 lines.append(f"Balance:                 ${balance.get('balance', 0) / 100:,.2f}")
             
@@ -417,7 +555,10 @@ class TradingSystemManager:
                     lines.append(f"No active positions")
                 
             except Exception as e:
-                portfolio_header = "💰 LIVE PORTFOLIO"
+                if self.is_paper_trading:
+                    portfolio_header = "💰 PAPER PORTFOLIO"
+                else:
+                    portfolio_header = "💰 LIVE PORTFOLIO"
                 lines.append(f"\n{portfolio_header}")
                 lines.append(f"Error fetching portfolio: {str(e)[:50]}")
         else:
@@ -427,7 +568,10 @@ class TradingSystemManager:
         if self.execution_manager and hasattr(self.execution_manager, 'get_status'):
             try:
                 exec_status = self.execution_manager.get_status()
-                exec_header = "🎯 LIVE EXECUTION"
+                if self.is_paper_trading:
+                    exec_header = "🎯 PAPER EXECUTION"
+                else:
+                    exec_header = "🎯 LIVE EXECUTION"
                 lines.append(f"\n{exec_header}")
                 
                 lines.append(f"Orders Sent:             {exec_status.get('orders_sent', 0)}")
@@ -491,7 +635,10 @@ class TradingSystemManager:
             lines.append("No recent logs")
 
         lines.append("=" * 80)
-        trading_mode = "LIVE TRADING MODE - Real money at risk!"
+        if self.is_paper_trading:
+            trading_mode = "PAPER TRADING MODE - Simulated trades for backtesting"
+        else:
+            trading_mode = "LIVE TRADING MODE - Real money at risk!"
         lines.append(f"{trading_mode}")
         lines.append("Press Ctrl+C to stop")
         
@@ -513,8 +660,12 @@ class TradingSystemManager:
     
     async def run(self):
         try:
-            logger.info("🔴 Starting KBTCH Trading System in LIVE TRADING mode")
-            logger.info("⚠️  REAL MONEY WILL BE USED - trades will be executed live!")
+            if self.is_paper_trading:
+                logger.info("📄 Starting KBTCH Trading System in PAPER TRADING mode")
+                logger.info("💡 Simulated trades will be executed for backtesting")
+            else:
+                logger.info("🔴 Starting KBTCH Trading System in LIVE TRADING mode")
+                logger.info("⚠️  REAL MONEY WILL BE USED - trades will be executed live!")
             
             self.setup_event_monitoring()
             
@@ -569,7 +720,7 @@ class TradingSystemManager:
             print("FINAL STATS")
             print("=" * 70)
             runtime = time.time() - self.stats['start_time']
-            trading_mode = "LIVE TRADING"
+            trading_mode = "PAPER TRADING" if self.is_paper_trading else "LIVE TRADING"
             print(f"Trading Mode:            {trading_mode}")
             print(f"Total Runtime:           {runtime:.1f} seconds")
             print(f"Price Updates:           {self.stats['price_updates']}")
