@@ -50,7 +50,6 @@ class UnifiedCryptoManager:
             'coinbase': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': 'BTC/USD'},
             'kraken': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': 'BTC/USD'},
             'bitstamp': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': 'BTC/USD'},
-            'gemini': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': 'BTC/USD'},
             'cryptocom': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': 'BTC/USDT'},
             'okx': {'ohlcv_symbol': 'BTC/USD', 'brti_symbol': None}
         }
@@ -111,7 +110,7 @@ class UnifiedCryptoManager:
     def calculate_volume_spikes(self):
         exchange_codes = {
             'coinbase': 'CB', 'kraken': 'KR', 'bitstamp': 'BS', 
-            'gemini': 'GM', 'cryptocom': 'CC', 'okx': 'OKX'
+            'cryptocom': 'CC', 'okx': 'OKX'
         }
         
         volume_spikes = []
@@ -460,7 +459,7 @@ class UnifiedCryptoManager:
         
         exchange_codes = {
             'coinbase': 'CB', 'kraken': 'KR', 'bitstamp': 'BS', 
-            'gemini': 'GM', 'cryptocom': 'CC'
+            'cryptocom': 'CC'
         }
         
         valid_codes = [exchange_codes.get(ex, ex[:2].upper()) for ex in valid_exchanges]

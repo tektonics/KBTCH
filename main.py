@@ -440,7 +440,7 @@ class TradingSystemManager:
                     for i, pos in enumerate(active_positions[:3]):
                         market = pos.get('market_ticker', 'Unknown')[:15]
                         position = pos.get('position', 0)
-                        value = pos.get('market_exposure', 0) * position / 100
+                        value = pos.get('market_exposure', 0) / 100
                         side = "YES" if position > 0 else "NO"
                         lines.append(f"Position {i+1}:            {market} {side} {abs(position)} (${value:,.0f})")
                 

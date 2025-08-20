@@ -92,18 +92,21 @@ class SimulatedPortfolioManager:
         self._reset_daily_counters_if_needed()
         
         return {
-            "balance": int(self.balance),  # Balance in cents
-            "withdrawable_balance": int(self.balance),  # Simplified - all balance is withdrawable
+            "balance": int(self.balance),
+            "withdrawable_balance": int(self.balance), 
             "account_type": "papertrading"
         }
     
     def get_positions(self) -> Dict[str, Any]:
-        """Get current positions (compatible with real portfolio manager interface)"""
         self._update_unrealized_pnl()
         
         market_positions = []
         for market_ticker, position in self.positions.items():
-            if position.contracts != 0:  # Only include active positions
+            if position.contracts != 0:
+                current_market_value = 0.0
+                if position.last_mark_price > 0:
+                    current_market_value = abs(position.contracts) * position.last_mark_price
+
                 market_positions.append({
                     "market_ticker": market_ticker,
                     "position": position.contracts,
@@ -184,7 +187,6 @@ class SimulatedPortfolioManager:
             if fill_contracts > order.remaining_contracts:
                 fill_contracts = order.remaining_contracts
             
-            # Create fill record
             fill = Fill(
                 fill_id=f"fill_{int(time.time() * 1000)}_{len(self.fills)}",
                 order_id=order_id,
@@ -197,7 +199,6 @@ class SimulatedPortfolioManager:
                 commission=self.papertrading_settings.commission_per_contract * fill_contracts
             )
             
-            # Update order status
             order.filled_contracts += fill_contracts
             order.remaining_contracts -= fill_contracts
             order.fills.append(fill)
@@ -207,13 +208,9 @@ class SimulatedPortfolioManager:
             else:
                 order.status = "partially_filled"
             
-            # Process the fill for portfolio accounting
             self._process_fill_accounting(fill)
             
-            # Store fill
             self.fills.append(fill)
-            
-            # Update statistics
             self.total_trades += 1
             self.total_commission_paid += fill.commission
             
@@ -227,10 +224,9 @@ class SimulatedPortfolioManager:
             return False
     
     def _process_fill_accounting(self, fill: Fill) -> None:
-        """Update positions and balance based on fill"""
         market_ticker = fill.market_ticker
-        
-        # Initialize position if it doesn't exist
+    
+
         if market_ticker not in self.positions:
             self.positions[market_ticker] = Position(
                 market_ticker=market_ticker,
@@ -239,88 +235,75 @@ class SimulatedPortfolioManager:
                 avg_entry_price=0.0,
                 total_cost=0.0
             )
-        
+    
         position = self.positions[market_ticker]
         fill_value = fill.contracts * fill.price
-        
+    
         if fill.action == "buy":
-            # Calculate new average entry price
-            if position.contracts >= 0:  # Adding to long position
-                new_total_cost = position.total_cost + fill_value
-                new_contracts = position.contracts + fill.contracts
-                position.avg_entry_price = new_total_cost / new_contracts if new_contracts > 0 else 0
-                position.total_cost = new_total_cost
-                position.contracts = new_contracts
-            else:  # Covering short position
-                contracts_to_cover = min(fill.contracts, abs(position.contracts))
-                remaining_fill_contracts = fill.contracts - contracts_to_cover
+            if position.contracts > 0 and position.side != fill.side:
+                contracts_to_close = min(fill.contracts, position.contracts)
+            
+                if position.side == "yes":
+                    close_price = 100 - fill.price
+                else:
+                    close_price = 100 - fill.price
                 
-                # Realize P&L on covered contracts
-                realized_pnl = contracts_to_cover * (position.avg_entry_price - fill.price)
+                realized_pnl = contracts_to_close * (close_price - position.avg_entry_price)
                 position.realized_pnl += realized_pnl
                 self.total_realized_pnl += realized_pnl
                 self.daily_pnl += realized_pnl
-                
-                # Update position
-                position.contracts += contracts_to_cover
-                position.total_cost -= contracts_to_cover * position.avg_entry_price
-                
-                # Handle remaining contracts if any
-                if remaining_fill_contracts > 0:
-                    position.contracts += remaining_fill_contracts
-                    position.total_cost += remaining_fill_contracts * fill.price
-                    if position.contracts > 0:
-                        position.avg_entry_price = position.total_cost / position.contracts
             
-            # Reduce balance by fill value and commission
+                position.contracts -= contracts_to_close
+                remaining_fill = fill.contracts - contracts_to_close
+            
+                if remaining_fill > 0:
+                    position.side = fill.side
+                    position.contracts = remaining_fill
+                    position.avg_entry_price = fill.price
+                    position.total_cost = remaining_fill * fill.price
+                elif position.contracts == 0:
+                    position.side = fill.side
+                    position.avg_entry_price = 0.0
+                    position.total_cost = 0.0
+            else:
+                if position.contracts == 0:
+                    position.side = fill.side
+                    position.contracts = fill.contracts
+                    position.avg_entry_price = fill.price
+                    position.total_cost = fill_value
+                else:
+
+                    new_total_cost = position.total_cost + fill_value
+                    new_contracts = position.contracts + fill.contracts
+                    position.avg_entry_price = new_total_cost / new_contracts
+                    position.total_cost = new_total_cost
+                    position.contracts = new_contracts
+        
             self.balance -= (fill_value + fill.commission)
-            
+        
         else:  # sell
-            if position.contracts > 0:  # Closing long position
+            if position.side == fill.side and position.contracts > 0:
                 contracts_to_sell = min(fill.contracts, position.contracts)
-                remaining_fill_contracts = fill.contracts - contracts_to_sell
-                
-                # Realize P&L on sold contracts
+            
+
                 realized_pnl = contracts_to_sell * (fill.price - position.avg_entry_price)
                 position.realized_pnl += realized_pnl
                 self.total_realized_pnl += realized_pnl
                 self.daily_pnl += realized_pnl
-                
-                # Update position
+            
+
                 position.contracts -= contracts_to_sell
-                position.total_cost -= contracts_to_sell * position.avg_entry_price
-                
-                # Handle remaining contracts if any (going short)
-                if remaining_fill_contracts > 0:
-                    position.contracts -= remaining_fill_contracts
-                    position.total_cost += remaining_fill_contracts * fill.price
-                    if position.contracts < 0:
-                        position.avg_entry_price = position.total_cost / abs(position.contracts)
-            
-            else:  # Adding to short position or creating new short
-                new_total_cost = position.total_cost + fill_value
-                new_contracts = position.contracts - fill.contracts
-                position.avg_entry_price = new_total_cost / abs(new_contracts) if new_contracts != 0 else 0
-                position.total_cost = new_total_cost
-                position.contracts = new_contracts
-            
-            # Increase balance by fill value minus commission
+                if position.contracts == 0:
+                    position.avg_entry_price = 0.0
+                    position.total_cost = 0.0
+                else:
+                    position.total_cost = position.contracts * position.avg_entry_price
+        
             self.balance += (fill_value - fill.commission)
-        
-        # Update position side
-        if position.contracts > 0:
-            position.side = fill.side
-        elif position.contracts < 0:
-            position.side = "no" if fill.side == "yes" else "yes"
-        
-        # Update drawdown tracking
-        if self.balance > self.peak_balance:
-            self.peak_balance = self.balance
-        else:
-            current_drawdown = (self.peak_balance - self.balance) / self.peak_balance
-            if current_drawdown > self.max_drawdown:
-                self.max_drawdown = current_drawdown
     
+    
+        self.total_commission_paid += fill.commission
+
     def _handle_market_data_update(self, event) -> None:
         """Update position valuations based on market data"""
         try:
@@ -330,12 +313,19 @@ class SimulatedPortfolioManager:
             if market_ticker in self.positions:
                 position = self.positions[market_ticker]
                 
-                # Use appropriate market price based on position side
-                if position.side == "yes":
-                    mark_price = data.get("yes_bid", 0) if position.contracts > 0 else data.get("yes_ask", 0)
+                if position.contracts > 0:
+                    if position.side == "yes":
+                        mark_price = data.get("yes_bid", 0)  # Can sell at bid
+                    else:
+                        mark_price = data.get("no_bid", 0)   # Can sell at bid
+                elif position.contracts < 0:
+                    if position.side == "yes":
+                        mark_price = data.get("yes_ask", 0)  
+                    else:
+                        mark_price = data.get("no_ask", 0)   
                 else:
-                    mark_price = data.get("no_bid", 0) if position.contracts > 0 else data.get("no_ask", 0)
-                
+                    mark_price = 0
+            
                 if mark_price and mark_price > 0:
                     position.last_mark_price = mark_price
                     

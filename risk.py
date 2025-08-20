@@ -91,7 +91,6 @@ class RiskManager:
                     loss_pct = (entry_price - current_price) / entry_price
                 
                     if loss_pct > self.stop_loss_percentage:
-                       # Generate SELL signal for stop loss
                         stop_signal = {
                             'market_ticker': market,
                             'signal_type': f"SELL_{position['side'].upper()}",
@@ -217,6 +216,9 @@ class RiskManager:
         return True, "Position sizing OK"
 
     def _check_market_concentration(self, signal_data: Dict[str, Any]) -> Tuple[bool, str]:
+        if signal_data.get('reason', '').startswith('STOP LOSS'):
+            return True, "Stop loss exit allowed"
+
         try:
             market_ticker = signal_data.get("market_ticker")
             
