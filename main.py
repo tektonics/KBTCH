@@ -91,7 +91,7 @@ class PaperPortfolioManager:
             return False
         
         market = order_data.get("market_ticker")
-        side = order_data.get("side")
+        side = order_data.get("side")  # "yes" or "no"
         quantity = order_data.get("quantity", 1)
         price = order_data.get("price", 50)
         
@@ -105,14 +105,20 @@ class PaperPortfolioManager:
             self.positions[market] = {"quantity": 0, "avg_price": 0}
         
         pos = self.positions[market]
-        total_cost = pos["quantity"] * pos["avg_price"] + quantity * fill_price
-        total_quantity = pos["quantity"] + (quantity if side == "yes" else -quantity)
+        
+        # Calculate position change: positive for YES positions, negative for NO positions
+        position_change = quantity if side == "yes" else -quantity
+        
+        total_cost = pos["quantity"] * pos["avg_price"] + position_change * fill_price
+        total_quantity = pos["quantity"] + position_change
         
         if total_quantity != 0:
             pos["avg_price"] = total_cost / abs(total_quantity)
+        else:
+            pos["avg_price"] = 0
         pos["quantity"] = total_quantity
         
-        # Update balance
+        # Update balance (subtract cost for buys)
         cost = quantity * fill_price + settings.commission_per_contract
         self.balance -= cost
         
@@ -147,10 +153,22 @@ class PaperExecutionManager:
             # Simulate fill delay
             time.sleep(self.settings.fill_delay_seconds)
             
+            # Convert order data to the format expected by simulate_fill
+            fill_data = {
+                "market_ticker": order_data.get('market_ticker'),
+                "side": order_data.get('side'),  # "yes" or "no"
+                "quantity": order_data.get('count', 1),
+                "price": order_data.get('price', 50)
+            }
+            
             # Try to simulate fill
-            if self.portfolio_manager.simulate_fill(order_data):
+            if self.portfolio_manager.simulate_fill(fill_data):
                 self.orders_sent += 1
-                logger.info(f"📄 PAPER TRADE EXECUTED: {order_data.get('signal_type')} {order_data.get('market_ticker')}")
+                client_order_id = order_data.get('client_order_id', 'unknown')
+                action = order_data.get('action', 'buy').upper()
+                side = order_data.get('side', 'yes').upper()
+                market = order_data.get('market_ticker', 'unknown')
+                logger.info(f"📄 PAPER TRADE EXECUTED: {action} {side} {market} (ID: {client_order_id[:8]})")
             else:
                 self.orders_failed += 1
                 logger.warning(f"📄 PAPER TRADE FAILED: {order_data.get('market_ticker')} (simulation)")
@@ -325,13 +343,14 @@ class TradingSystemManager:
     def start_execution_manager(self):
         """Start execution manager based on trading mode"""
         try:
+            from order_manager import OrderManager
+            if not hasattr(self, 'order_manager'):
+                self.order_manager = OrderManager()
+            
             if self.is_paper_trading:
                 self.execution_manager = PaperExecutionManager(self.portfolio_manager)
                 logger.info("✅ Paper Execution Manager started")
             else:
-                from order_manager import OrderManager
-                if not hasattr(self, 'order_manager'):
-                    self.order_manager = OrderManager()
                 self.execution_manager = ExecutionManager(self.order_manager)
                 logger.info("✅ Live Execution Manager started")
         except Exception as e:
