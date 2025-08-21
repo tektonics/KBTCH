@@ -415,6 +415,8 @@ class TradingSystemManager:
     def start_cep_engine(self):
         try:
             self.cep_engine = CEPEngine()
+            cep_logger = logging.getLogger('CEP')
+            cep_logger.setLevel(logging.WARNING)
             logger.info("✅ CEP Engine started successfully")
         except Exception as e:
             logger.error(f"Failed to start CEP Engine: {e}")

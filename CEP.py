@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from collections import deque
 from event_bus import event_bus, EventTypes
 import statistics
-
+import os
 logger = logging.getLogger(__name__)
 
 
@@ -72,6 +72,27 @@ class CEPEngine:
     """Complex Event Processing Engine"""
     
     def __init__(self):
+
+        os.makedirs("logs", exist_ok=True)
+    
+        # Pattern detection specific logs
+        pattern_handler = logging.FileHandler("logs/pattern_detection.log")
+        pattern_handler.setLevel(logging.INFO)
+        pattern_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - PATTERN - %(message)s'
+        ))
+    
+        # General CEP logs
+        cep_handler = logging.FileHandler("logs/cep_engine.log")
+        cep_handler.setLevel(logging.DEBUG)
+        cep_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s'
+        ))
+    
+        logger.addHandler(pattern_handler)
+        logger.addHandler(cep_handler)
+        logger.setLevel(logging.DEBUG)
+
         # Event storage for pattern detection
         self.price_history: Deque[PriceEvent] = deque(maxlen=100)
         self.market_events: Dict[str, Deque[MarketEvent]] = {}
@@ -102,15 +123,19 @@ class CEPEngine:
     
     def _handle_price_update(self, event) -> None:
         """Process incoming price updates from UDM with enhanced data"""
+        logger.info(f"🔄 CEP processing price update: {event.data.keys()}")
         try:
             self.events_processed += 1
             data = event.data
+            logger.info(f"✅ CEP step 1: Got data, events_processed={self.events_processed}")
             
             if "brti_price" not in data:
+                logger.info("❌ CEP: No brti_price, returning")
                 return
             
             brti_price = data["brti_price"]
             self.current_brti = brti_price
+            logger.info(f"✅ CEP step 2: brti_price={brti_price}")
             
             # Extract enhanced UDM data
             utilized_depth = data.get("utilized_depth")
@@ -120,6 +145,7 @@ class CEPEngine:
             rsi = data.get("rsi")
             udm_momentum = data.get("momentum")
             avg_price = data.get("avg_price")
+            logger.info(f"✅ CEP step 3: Extracted UDM data, udm_momentum={udm_momentum}, rsi={rsi}")
             
             # Store enhanced price event
             price_event = PriceEvent(
@@ -134,58 +160,18 @@ class CEPEngine:
                 momentum=udm_momentum,
                 avg_price=avg_price
             )
+            logger.info(f"✅ CEP step 4: Created PriceEvent")
+            
             self.price_history.append(price_event)
+            logger.info(f"✅ CEP step 5: Added to history, length={len(self.price_history)}")
             
-            # Update volatility metrics
-            self._update_volatility_metrics()
-            
-            # Update market regime (enhanced with UDM data)
-            self._update_market_regime_enhanced(rsi, udm_momentum, volume_spikes)
-            
-            # Detect patterns (enhanced with UDM data)
-            momentum_pattern = self._detect_momentum_pattern_enhanced(udm_momentum, rsi)
-            price_trend = self._detect_price_trend()
-            volume_pattern = self._analyze_volume_patterns(volume_spikes)
-            
-            # Calculate enhanced confidence boost
-            confidence_boost = self._calculate_enhanced_confidence_boost(
-                momentum_pattern, price_trend, volume_pattern, rsi, valid_exchanges
-            )
-            
-            # Create enriched event with UDM enhancements
-            enriched_event = EnrichedEvent(
-                timestamp=time.time(),
-                event_type="ENRICHED_PRICE_UPDATE",
-                brti_price=brti_price,
-                momentum_pattern=momentum_pattern,
-                market_regime=self.market_regime,
-                volatility_level=self._classify_volatility(),
-                price_trend=price_trend,
-                confidence_boost=confidence_boost,
-                context={
-                    "volatility": self.current_volatility,
-                    "price_history_length": len(self.price_history),
-                    "utilized_depth": utilized_depth,
-                    "dynamic_cap": dynamic_cap,
-                    "valid_exchanges": valid_exchanges,
-                    "volume_spikes": volume_spikes,
-                    "rsi": rsi,
-                    "udm_momentum": udm_momentum,
-                    "avg_price": avg_price,
-                    "volume_pattern": volume_pattern,
-                    "source": "cep_engine"
-                }
-            )
-            
-            # Publish enriched event
-            self._publish_enriched_event(enriched_event)
-            
-            # Check if we should trigger market analysis
-            self._trigger_market_analysis()
+            # THIS IS WHERE I SUSPECT IT'S FAILING:
+            momentum_pattern = self._detect_momentum_pattern(udm_momentum, rsi)
+            logger.info(f"✅ CEP step 6: Pattern detection complete, pattern={momentum_pattern}")
             
         except Exception as e:
-            logger.error(f"Error processing price update in CEP: {e}")
-    
+            logger.error(f"❌ CEP ERROR: {e}", exc_info=True)
+
     def _handle_market_data(self, event) -> None:
         """Process incoming market data from KMS"""
         try:
@@ -257,46 +243,98 @@ class CEPEngine:
                 if len(self.volatility_window) >= 10:
                     self.current_volatility = statistics.mean(self.volatility_window)
     
-    def _update_market_regime(self) -> None:
-        """Legacy market regime classification (kept for compatibility)"""
+    def _update_market_regime(self, rsi: Optional[float] = None, 
+                             udm_momentum: Optional[str] = None, 
+                             volume_spikes: List[str] = None) -> None:
+        """Unified market regime classification with optional UDM enhancements"""
+        volume_spikes = volume_spikes or []
+        
+        # Base regime classification
         if self.current_volatility > self.volatility_threshold_high:
-            self.market_regime = "VOLATILE"
+            base_regime = "VOLATILE"
         elif len(self.price_history) >= self.trend_lookback:
             prices = [event.brti_price for event in list(self.price_history)[-self.trend_lookback:]]
             price_change = (prices[-1] - prices[0]) / prices[0]
             
             if price_change > self.trend_threshold:
-                self.market_regime = "TRENDING_UP"
+                base_regime = "TRENDING_UP"
             elif price_change < -self.trend_threshold:
-                self.market_regime = "TRENDING_DOWN"
+                base_regime = "TRENDING_DOWN"
             else:
-                self.market_regime = "NORMAL"
+                base_regime = "NORMAL"
         else:
-            self.market_regime = "NORMAL"
-    
-    def _detect_momentum_pattern(self) -> Optional[str]:
-        """Detect momentum patterns in price history"""
+            base_regime = "NORMAL"
+        
+        # If no UDM data, use base regime
+        if not any([rsi, udm_momentum, volume_spikes]):
+            self.market_regime = base_regime
+            return
+        
+        # Enhance with UDM indicators
+        regime_modifiers = []
+        
+        # RSI enhancements
+        if rsi is not None:
+            if rsi > 70:
+                regime_modifiers.append("OVERBOUGHT")
+            elif rsi < 30:
+                regime_modifiers.append("OVERSOLD")
+        
+        # UDM momentum enhancements
+        if udm_momentum in ["↑↑", "↓↓"]:
+            regime_modifiers.append("STRONG_MOMENTUM")
+        
+        # Volume spike enhancements
+        if len(volume_spikes) >= 2:
+            regime_modifiers.append("HIGH_VOLUME")
+        
+        # Combine regime with modifiers
+        if regime_modifiers:
+            self.market_regime = f"{base_regime}_{'+'.join(regime_modifiers)}"
+        else:
+            self.market_regime = base_regime
+
+    def _detect_momentum_pattern(self, udm_momentum: Optional[str] = None, 
+                               rsi: Optional[float] = None) -> Optional[str]:
+        """Unified momentum detection with optional UDM enhancements"""
+        logger.info(f"🔍 Pattern detection START: history_len={len(self.price_history)}, udm_momentum='{udm_momentum}', rsi={rsi}")
+        
         if len(self.price_history) < self.momentum_lookback:
+            logger.info(f"❌ Not enough history: {len(self.price_history)} < {self.momentum_lookback}")
             return None
         
         recent_prices = [event.brti_price for event in list(self.price_history)[-self.momentum_lookback:]]
+        logger.info(f"📈 Recent prices: {recent_prices}")
         
         # Check for consistent upward movement
-        if all(recent_prices[i] > recent_prices[i-1] for i in range(1, len(recent_prices))):
+        upward_moves = [recent_prices[i] > recent_prices[i-1] for i in range(1, len(recent_prices))]
+        logger.info(f"📊 Upward moves: {upward_moves}")
+        
+        if all(upward_moves):
             total_change = (recent_prices[-1] - recent_prices[0]) / recent_prices[0]
-            if total_change > 0.002:  # 0.2% threshold
-                self.patterns_detected += 1
-                return "UPWARD_MOMENTUM"
+            logger.info(f"📈 Total change: {total_change:.6f} (threshold: {0.002})")
+            if total_change > 0.002:
+                base_pattern = "UPWARD_MOMENTUM"
+                logger.info(f"✅ Base pattern: {base_pattern}")
+            else:
+                base_pattern = None
+                logger.info(f"❌ Change too small for base pattern")
+        else:
+            base_pattern = None
+            logger.info(f"❌ No consistent upward movement")
         
-        # Check for consistent downward movement
-        elif all(recent_prices[i] < recent_prices[i-1] for i in range(1, len(recent_prices))):
-            total_change = abs((recent_prices[-1] - recent_prices[0]) / recent_prices[0])
-            if total_change > 0.002:  # 0.2% threshold
-                self.patterns_detected += 1
-                return "DOWNWARD_MOMENTUM"
+        # Check UDM logic
+        logger.info(f"🔍 UDM check: udm_momentum='{udm_momentum}', repr={repr(udm_momentum)}")
+        if not base_pattern and udm_momentum:
+            if udm_momentum == "→":
+                logger.info(f"✅ UDM match: UDM_MODERATE_UP")
+                self.patterns_detected += 1  # ADD THIS LINE!
+                return "UDM_MODERATE_UP"
+            else:
+                logger.info(f"❌ No UDM match for '{udm_momentum}'")
         
-        return None
-    
+        return base_pattern
+
     def _detect_price_trend(self) -> Optional[str]:
         """Detect longer-term price trends"""
         if len(self.price_history) < self.trend_lookback:
@@ -325,82 +363,6 @@ class CEPEngine:
             return "MEDIUM"
         else:
             return "LOW"
-    
-    def _update_market_regime_enhanced(self, rsi: Optional[float], udm_momentum: Optional[str], 
-                                     volume_spikes: List[str]) -> None:
-        """Enhanced market regime classification using UDM data"""
-        # Start with volatility-based classification
-        if self.current_volatility > self.volatility_threshold_high:
-            base_regime = "VOLATILE"
-        elif len(self.price_history) >= self.trend_lookback:
-            prices = [event.brti_price for event in list(self.price_history)[-self.trend_lookback:]]
-            price_change = (prices[-1] - prices[0]) / prices[0]
-            
-            if price_change > self.trend_threshold:
-                base_regime = "TRENDING_UP"
-            elif price_change < -self.trend_threshold:
-                base_regime = "TRENDING_DOWN"
-            else:
-                base_regime = "NORMAL"
-        else:
-            base_regime = "NORMAL"
-        
-        # Enhance with UDM indicators
-        regime_modifiers = []
-        
-        # RSI enhancements
-        if rsi is not None:
-            if rsi > 70:
-                regime_modifiers.append("OVERBOUGHT")
-            elif rsi < 30:
-                regime_modifiers.append("OVERSOLD")
-        
-        # UDM momentum enhancements
-        if udm_momentum in ["↑↑", "↓↓"]:
-            regime_modifiers.append("STRONG_MOMENTUM")
-        
-        # Volume spike enhancements
-        if len(volume_spikes) >= 2:  # Multiple exchanges showing volume spikes
-            regime_modifiers.append("HIGH_VOLUME")
-        
-        # Combine regime with modifiers
-        if regime_modifiers:
-            self.market_regime = f"{base_regime}_{'+'.join(regime_modifiers)}"
-        else:
-            self.market_regime = base_regime
-    
-    def _detect_momentum_pattern_enhanced(self, udm_momentum: Optional[str], 
-                                        rsi: Optional[float]) -> Optional[str]:
-        """Enhanced momentum detection combining CEP patterns with UDM indicators"""
-        # Get base CEP momentum pattern
-        cep_momentum = self._detect_momentum_pattern()
-        
-        # If no CEP pattern, check UDM momentum
-        if not cep_momentum and udm_momentum:
-            if udm_momentum == "↑↑":
-                return "UDM_STRONG_UP"
-            elif udm_momentum == "↓↓":
-                return "UDM_STRONG_DOWN"
-            elif udm_momentum == "↑":
-                return "UDM_MODERATE_UP"
-            elif udm_momentum == "↓":
-                return "UDM_MODERATE_DOWN"
-        
-        # If we have CEP momentum, enhance it with UDM data
-        if cep_momentum:
-            # Check for alignment between CEP and UDM
-            if cep_momentum == "UPWARD_MOMENTUM" and udm_momentum in ["↑", "↑↑"]:
-                return "CONFIRMED_UPWARD_MOMENTUM"
-            elif cep_momentum == "DOWNWARD_MOMENTUM" and udm_momentum in ["↓", "↓↓"]:
-                return "CONFIRMED_DOWNWARD_MOMENTUM"
-            elif cep_momentum == "UPWARD_MOMENTUM" and udm_momentum in ["↓", "↓↓"]:
-                return "CONFLICTING_MOMENTUM_UP"  # CEP says up, UDM says down
-            elif cep_momentum == "DOWNWARD_MOMENTUM" and udm_momentum in ["↑", "↑↑"]:
-                return "CONFLICTING_MOMENTUM_DOWN"  # CEP says down, UDM says up
-            else:
-                return cep_momentum  # Return original CEP pattern
-        
-        return None
     
     def _analyze_volume_patterns(self, volume_spikes: List[str]) -> Optional[str]:
         """Analyze volume spike patterns from UDM"""
@@ -444,24 +406,33 @@ class CEPEngine:
         
         return None
     
-    def _calculate_enhanced_confidence_boost(self, momentum_pattern: Optional[str], 
-                                           price_trend: Optional[str], volume_pattern: Optional[str],
-                                           rsi: Optional[float], valid_exchanges: int) -> float:
-        """Enhanced confidence calculation using all UDM data"""
+    def _calculate_confidence_boost(self, momentum_pattern: Optional[str] = None, 
+                                    price_trend: Optional[str] = None, 
+                                    volume_pattern: Optional[str] = None,
+                                    rsi: Optional[float] = None, 
+                                    valid_exchanges: int = None) -> float:
+        """Unified confidence calculation with optional UDM enhancements"""
         boost = 1.0
         
-        # Base momentum boosts (enhanced patterns get bigger boosts)
+        # Base momentum boosts (if no UDM data available)
+        if momentum_pattern and not any([volume_pattern, rsi, valid_exchanges]):
+            # Legacy simple momentum boost
+            if momentum_pattern in ["UPWARD_MOMENTUM", "DOWNWARD_MOMENTUM"]:
+                boost += 0.15
+            return min(boost, 2.0)
+        
+        # Enhanced momentum boosts with UDM data
         if momentum_pattern:
             momentum_boosts = {
-                "CONFIRMED_UPWARD_MOMENTUM": 0.25,     # CEP + UDM agree
+                "CONFIRMED_UPWARD_MOMENTUM": 0.25,
                 "CONFIRMED_DOWNWARD_MOMENTUM": 0.25,
-                "UPWARD_MOMENTUM": 0.15,               # CEP only
+                "UPWARD_MOMENTUM": 0.15,
                 "DOWNWARD_MOMENTUM": 0.15,
-                "UDM_STRONG_UP": 0.12,                 # UDM strong signals
+                "UDM_STRONG_UP": 0.12,
                 "UDM_STRONG_DOWN": 0.12,
-                "UDM_MODERATE_UP": 0.08,               # UDM moderate signals
+                "UDM_MODERATE_UP": 0.08,
                 "UDM_MODERATE_DOWN": 0.08,
-                "CONFLICTING_MOMENTUM_UP": -0.10,      # Conflicting signals
+                "CONFLICTING_MOMENTUM_UP": -0.10,
                 "CONFLICTING_MOMENTUM_DOWN": -0.10
             }
             boost += momentum_boosts.get(momentum_pattern, 0)
@@ -481,16 +452,16 @@ class CEPEngine:
         
         # RSI-based adjustments
         if rsi is not None:
-            if 30 <= rsi <= 70:  # RSI in normal range
+            if 30 <= rsi <= 70:
                 boost += 0.05
-            elif rsi > 80 or rsi < 20:  # Extreme RSI
-                boost -= 0.05  # Reduce confidence at extremes
+            elif rsi > 80 or rsi < 20:
+                boost -= 0.05
         
         # Data quality adjustments
         if valid_exchanges is not None:
-            if valid_exchanges >= 4:  # Strong data quality
+            if valid_exchanges >= 4:
                 boost += 0.08
-            elif valid_exchanges <= 2:  # Weak data quality
+            elif valid_exchanges <= 2:
                 boost -= 0.10
         
         # Trend alignment boosts
@@ -499,14 +470,14 @@ class CEPEngine:
                 and price_trend == "UPTREND") or \
                (momentum_pattern in ["CONFIRMED_DOWNWARD_MOMENTUM", "DOWNWARD_MOMENTUM", "UDM_STRONG_DOWN"] 
                 and price_trend == "DOWNTREND"):
-                boost += 0.10  # Extra boost for aligned patterns
+                boost += 0.10
         
-        # Volatility adjustments (same as before)
+        # Volatility adjustments
         if self.current_volatility > self.volatility_threshold_high:
-            boost *= 0.8  # Reduce confidence during high volatility
+            boost *= 0.8
         
-        return min(boost, 2.0)  # Cap at 2.0x boost
-    
+        return min(boost, 2.0)
+
     def _analyze_market_patterns(self, market_ticker: str) -> Dict[str, Any]:
         """Analyze patterns specific to a market ticker"""
         patterns = {"confidence_boost": 1.0}
